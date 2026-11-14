@@ -1,19 +1,17 @@
-// One-time import: data/foodkeeper.json (USDA FSIS, public domain) -> shelf_life table.
+// Force a re-import: data/foodkeeper.json (USDA FSIS, public domain) -> shelf_life table.
+// Not needed normally: the bot imports automatically at startup when the table is empty.
 // Usage: bun run load-foodkeeper [path/to/foodkeeper.json]
 
 import { openDb } from "../src/db";
-import { loadShelfLife, parseFoodKeeper } from "../src/foodkeeper";
+import { DEFAULT_FOODKEEPER_PATH, importFoodKeeperFile } from "../src/foodkeeper";
 
-const path = process.argv[2] ?? "data/foodkeeper.json";
-const file = Bun.file(path);
-if (!(await file.exists())) {
-  console.error(`[foodkeeper] ${path} not found. Download https://www.fsis.usda.gov/shared/data/EN/foodkeeper.json there.`);
-  process.exit(1);
-}
-
-const rows = parseFoodKeeper(await file.json());
 const db = openDb();
-const count = loadShelfLife(db, rows);
-const withFridge = rows.filter((r) => r.fridge_min_days !== null).length;
-console.log(`[foodkeeper] loaded ${count} products (${withFridge} with fridge shelf life)`);
-db.close();
+try {
+  const count = await importFoodKeeperFile(db, process.argv[2] ?? DEFAULT_FOODKEEPER_PATH);
+  console.log(`[foodkeeper] loaded ${count} products`);
+} catch (error) {
+  console.error(`[foodkeeper] ${(error as Error).message}`);
+  process.exitCode = 1;
+} finally {
+  db.close();
+}

@@ -1,6 +1,8 @@
 import { Spectrum } from "spectrum-ts";
 import { imessage } from "spectrum-ts/providers/imessage";
 import { terminal } from "spectrum-ts/providers/terminal";
+import { openDb } from "./src/db";
+import { ensureShelfLife } from "./src/foodkeeper";
 import { mask, normalizeHandle, parseProviders } from "./src/providers";
 
 // Step 1: echo bot. PROVIDERS (in .env) picks any of: terminal, imessage (Photon cloud).
@@ -29,6 +31,16 @@ if (useCloud) {
   }
 }
 
+// Database: create tables, and import USDA FoodKeeper on first run.
+const db = openDb();
+try {
+  const imported = await ensureShelfLife(db);
+  if (imported) console.log(`[start] imported ${imported} FoodKeeper products`);
+} catch (error) {
+  console.error(`[start] FoodKeeper import failed: ${(error as Error).message}`);
+  process.exit(1);
+}
+
 const allowlist = new Set(
   (process.env.ECHO_ALLOWLIST ?? "")
     .split(",")
@@ -50,6 +62,7 @@ console.log(`[start] providers=${names.join(",")}`);
 
 process.on("SIGINT", async () => {
   await app.stop();
+  db.close();
   process.exit(0);
 });
 

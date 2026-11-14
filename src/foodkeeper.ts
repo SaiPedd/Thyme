@@ -131,6 +131,23 @@ export function loadShelfLife(db: Database, rows: ShelfLifeRow[]): number {
   return rows.length;
 }
 
+export const DEFAULT_FOODKEEPER_PATH = "data/foodkeeper.json";
+
+/** Read and import a FoodKeeper JSON file. Returns the row count. */
+export async function importFoodKeeperFile(db: Database, path: string = DEFAULT_FOODKEEPER_PATH): Promise<number> {
+  const file = Bun.file(path);
+  if (!(await file.exists())) {
+    throw new Error(`${path} not found. Download https://www.fsis.usda.gov/shared/data/EN/foodkeeper.json there.`);
+  }
+  return loadShelfLife(db, parseFoodKeeper(await file.json()));
+}
+
+/** Import FoodKeeper only when shelf_life is empty (first run / fresh clone). Returns rows imported, 0 if skipped. */
+export async function ensureShelfLife(db: Database, path: string = DEFAULT_FOODKEEPER_PATH): Promise<number> {
+  const { n } = db.query<{ n: number }, []>("SELECT COUNT(*) AS n FROM shelf_life").get()!;
+  return n > 0 ? 0 : importFoodKeeperFile(db, path);
+}
+
 /** Conservative shelf life (the minimum) for a storage. Null when FoodKeeper has no entry for it. */
 export function shelfLifeDays(row: ShelfLifeRow, storage: Storage): number | null {
   if (storage === "pantry") return row.pantry_min_days;

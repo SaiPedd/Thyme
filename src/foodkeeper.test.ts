@@ -1,6 +1,8 @@
 import { describe, expect, test } from "bun:test";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { openDb } from "./db";
-import { expiryFor, loadShelfLife, parseFoodKeeper, toDays } from "./foodkeeper";
+import { ensureShelfLife, expiryFor, loadShelfLife, parseFoodKeeper, toDays } from "./foodkeeper";
 
 // Small fixture in the published FoodKeeper layout: sheets of rows, each row a list of one-key objects.
 const fixture = {
@@ -93,6 +95,21 @@ describe("expiry math", () => {
 
   test("returns null when FoodKeeper has no entry for that storage", () => {
     expect(expiryFor(spinach!, "pantry", added)).toBeNull();
+  });
+});
+
+describe("ensureShelfLife", () => {
+  test("imports when empty, skips when already loaded", async () => {
+    const path = join(tmpdir(), `foodkeeper-test-${process.pid}.json`);
+    await Bun.write(path, JSON.stringify(fixture));
+    const db = openDb(":memory:");
+    expect(await ensureShelfLife(db, path)).toBe(4);
+    expect(await ensureShelfLife(db, path)).toBe(0);
+  });
+
+  test("fails clearly when the file is missing", async () => {
+    const db = openDb(":memory:");
+    expect(ensureShelfLife(db, "does/not/exist.json")).rejects.toThrow(/not found/);
   });
 });
 
