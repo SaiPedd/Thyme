@@ -148,3 +148,7 @@ vite.config.ts.timestamp-*
 # Turbo Repo
 .turbo
 .env
+
+# Local SQLite database (rebuild with bun run load-foodkeeper)
+data/*.db
+data/*.db-*
