@@ -1,19 +1,19 @@
 {
-  "name": "hackprinceton_project",
-  "module": "index.ts",
-  "type": "module",
+  "name": "fridge-bud",
+  "version": "0.0.1",
   "private": true,
+  "type": "module",
   "scripts": {
-    "start": "bun run index.ts",
+    "start": "bun index.ts",
+    "dev": "bun --watch index.ts",
+    "test": "bun test",
     "typecheck": "tsc --noEmit"
-  },
-  "devDependencies": {
-    "@types/bun": "latest"
-  },
-  "peerDependencies": {
-    "typescript": "^7"
   },
   "dependencies": {
     "spectrum-ts": "^12.16.0"
+  },
+  "devDependencies": {
+    "typescript": "^5",
+    "@types/bun": "latest"
   }
 }
