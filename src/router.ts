@@ -127,6 +127,8 @@ export function makeRouter(deps: RouterDeps) {
     } catch (error) {
       const code = error instanceof ReceiptError ? error.code : "llm";
       log(`[receipt] failed: ${code}`);
+      // A video or voice memo in the group isn't meant for us: stay quiet. In a DM, say what we need.
+      if (code === "not_image" && rctx.isGroup) return null;
       return RECEIPT_ERRORS[code];
     }
     const checked = checkReceipt(raw);

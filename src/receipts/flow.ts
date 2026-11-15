@@ -3,7 +3,8 @@
 //
 //   photo           -> "Got your receipt: 1. spinach $3.99 ... Reply yes to save, or tell me changes"
 //   "Sam paid"      -> buyer is Sam (also works as a caption on the photo)
-//   "2 is mine"     -> item 2 is the sender's; "3 and 4 are Jordan's"; "2 is shared" undoes it
+//   "2 is mine"     -> item 2 is the sender's; "3 and 4 are Jordan's"; "5 is me and Sam's"; "2 is shared" undoes it
+//   "split with Sam only" / "split between me and Jordan" / "just me and Sam" -> who shares the rest
 //   "total is $X"   -> use a corrected total when the numbers don't add up
 //   "yes"           -> record the expense (source receipt) and add the food to the fridge
 //   "cancel"        -> drop it
@@ -32,6 +33,8 @@ export interface PendingReceipt {
   unreadable: number;
   buyerId: number;
   senderId: number;
+  /** Who shares everything not assigned to specific people; null = the whole household. */
+  splitAmong: number[] | null;
   at: string;
 }
 
@@ -69,6 +72,7 @@ export function pendingFromCheck(r: CheckedReceipt, senderId: number, buyerId = 
     unreadable: r.unreadable,
     buyerId,
     senderId,
+    splitAmong: null,
     at: now().toISOString(),
   };
 }
@@ -81,7 +85,9 @@ export interface ReceiptReply {
   /** "second trip" / "again": the user says it isn't a duplicate. */
   notDuplicate: boolean;
   buyerId?: number;
-  assign: { index: number; ownerId: number | null }[];
+  assign: { index: number; owners: number[] | null }[];
+  /** Who shares the rest: a list, null for everyone, undefined for no change. */
+  splitAmong?: number[] | null;
   totalCents?: number;
   error?: string;
 }
@@ -94,6 +100,24 @@ function resolve(members: Member[], senderId: number, who: string): number | nul
   if (["i", "me", "mine", "my", "myself"].includes(w)) return senderId;
   return memberByName(members, w)?.id ?? null;
 }
+
+/** A name, not followed by "paid"/"bought" (that's the buyer, not an owner). */
+const NAME = String.raw`(?!(?:split|total|yes|ok|okay|cancel|and|is|are|paid|bought|only|just)\b)[a-z]+(?:'s)?\b(?!\s+(?:paid|bought))`;
+const NAMES = String.raw`${NAME}(?:\s*(?:,|&|\band\b)\s*${NAME})*`;
+const EVERYONE = /^(shared|everyone'?s?|for everyone|all of us|the (whole )?house(hold)?|everybody)$/i;
+
+/** "me and Sam's" -> [sender, Sam]; null if anyone is unknown (with their name). */
+function resolveList(members: Member[], senderId: number, list: string): { ids: number[] } | { unknown: string } {
+  const ids: number[] = [];
+  for (const part of list.split(/\s*(?:,|&|\band\b)\s*/i).map((x) => x.trim()).filter(Boolean)) {
+    const id = resolve(members, senderId, part);
+    if (id === null) return { unknown: part.replace(/'s$/i, "") };
+    ids.push(id);
+  }
+  return { ids: [...new Set(ids)] };
+}
+
+const unknownWho = (members: Member[], who: string) => `I don't know who "${who}" is. Roommates: ${members.map((m) => m.name).join(", ")}`;
 
 /** Parse a reply to a pending receipt. Null when the message isn't about the receipt. */
 export function parseReceiptReply(raw: string, members: Member[], senderId: number): ReceiptReply | null {
@@ -120,14 +144,40 @@ export function parseReceiptReply(raw: string, members: Member[], senderId: numb
     matched = true;
   }
 
-  const assignRe = new RegExp(String.raw`(?:items?\s+)?(${NUM_LIST})\s+(?:is|are|was|were|=|goes to|go to|for)\s+(?:just\s+|only\s+|all\s+)?(mine|me|shared|everyone'?s?|for everyone|(?:for\s+)?[a-z]+(?:'s)?)\b`, "gi");
+  // Item owners: "2 is mine", "3 and 4 are Sam's", "5 is me and Jordan's", "2 is shared".
+  const assignRe = new RegExp(
+    String.raw`(?:items?\s+)?(${NUM_LIST})\s+(?:is|are|was|were|=|goes to|go to|for)\s+(?:just\s+|only\s+|all\s+)?(?:split\s+(?:between|with)\s+)?(shared|everyone'?s?|for everyone|(?:for\s+)?${NAMES})`,
+    "gi",
+  );
   for (const m of text.matchAll(assignRe)) {
     const who = m[2]!.replace(/^for\s+/i, "");
-    const shared = /^(shared|everyone'?s?|for everyone)$/i.test(m[2]!);
-    const ownerId = shared ? null : resolve(members, senderId, who);
-    if (!shared && ownerId === null) return { ...out, error: `I don't know who "${who.replace(/'s$/, "")}" is. Roommates: ${members.map((x) => x.name).join(", ")}` };
-    for (const n of m[1]!.match(/\d+/g) ?? []) out.assign.push({ index: Number(n), ownerId });
+    let owners: number[] | null = null;
+    if (!EVERYONE.test(m[2]!)) {
+      const r = resolveList(members, senderId, who);
+      if ("unknown" in r) return { ...out, error: unknownWho(members, r.unknown) };
+      owners = r.ids;
+    }
+    for (const n of m[1]!.match(/\d+/g) ?? []) out.assign.push({ index: Number(n), owners });
     matched = true;
+  }
+
+  // Who shares the rest: "split with Sam only" (sender + Sam), "split between Sam and Jordan" (exactly them),
+  // "just me and Sam", "split evenly" / "split with everyone" (back to the whole house).
+  if (/\bsplit\s+(?:it\s+)?(?:evenly|equally|with everyone|between everyone|among everyone)\b/i.test(text)) {
+    out.splitAmong = null;
+    matched = true;
+  } else {
+    const splitWith = text.match(new RegExp(String.raw`\bsplit\s+(?:it\s+|this\s+|the rest\s+)?(with|between|among|amongst)\s+(?:just\s+|only\s+)?(${NAMES})`, "i"));
+    const justUs = text.match(new RegExp(String.raw`(?:^|[,\s])(?:just|only)\s+(me\s+and\s+${NAMES}|${NAME}\s+and\s+me)\b`, "i"));
+    // "with Sam" includes the sender; "between Sam and Jordan" and "just me and Sam" are exactly those people.
+    const includeSender = splitWith?.[1]!.toLowerCase() === "with";
+    const names = splitWith?.[2] ?? justUs?.[1];
+    if (names) {
+      const r = resolveList(members, senderId, names);
+      if ("unknown" in r) return { ...out, error: unknownWho(members, r.unknown) };
+      out.splitAmong = [...new Set(includeSender ? [senderId, ...r.ids] : r.ids)];
+      matched = true;
+    }
   }
 
   const total = t.match(/\btotal\s+(?:is|was|=|should be)?\s*(\$?\s?\d[\d,]*(?:\.\d{1,2})?)/);
@@ -143,10 +193,13 @@ export function parseReceiptReply(raw: string, members: Member[], senderId: numb
 
 // ---- Wording ----
 
+const list = (xs: string[]) => (xs.length <= 1 ? (xs[0] ?? "") : `${xs.slice(0, -1).join(", ")} and ${xs.at(-1)}`);
+
 export function receiptSummary(p: PendingReceipt, members: Member[]): string {
   const name = (id: number) => members.find((m) => m.id === id)?.name ?? "someone";
   const lines = [`Got ${p.store ? `the ${p.store}` : "your"} receipt:`];
-  p.items.forEach((it, i) => lines.push(`${i + 1}. ${it.name} ${formatCents(it.cents)}${it.ownerId !== null ? ` (just ${name(it.ownerId)}'s)` : ""}`));
+  const who = (ids: number[]) => (ids.length === 1 ? `just ${name(ids[0]!)}'s` : list(ids.map(name)));
+  p.items.forEach((it, i) => lines.push(`${i + 1}. ${it.name} ${formatCents(it.cents)}${it.owners?.length ? ` (${who(it.owners)})` : ""}`));
   const extras = [
     ...(p.discountCents ? [`savings -${formatCents(p.discountCents)}`] : []),
     ...(p.taxCents ? [`tax ${formatCents(p.taxCents)}`] : []),
@@ -158,8 +211,10 @@ export function receiptSummary(p: PendingReceipt, members: Member[]): string {
     lines.push(`Heads up: the lines add up to ${formatCents(computed)}, but the total says ${formatCents(p.totalCents)}. Reply "total is $X" to fix it, or "yes" to use ${formatCents(p.totalCents)}.`);
   }
   if (p.unreadable) lines.push(`I couldn't read ${p.unreadable} line${p.unreadable === 1 ? "" : "s"}. Is anything missing? You can say "total is $X".`);
-  lines.push(`Paid by ${name(p.buyerId)}. Everything is split evenly unless you say otherwise.`);
-  lines.push(`Reply "yes" to save, or tell me changes like "Sam paid" or "2 is mine". "cancel" to drop it.`);
+  const assigned = p.items.some((it) => it.owners?.length);
+  const among = p.splitAmong ? `split between ${list(p.splitAmong.map(name))}` : "split evenly with everyone";
+  lines.push(`Paid by ${name(p.buyerId)}. ${assigned ? `The rest is ${among}` : `Everything is ${among}`}${p.splitAmong ? "." : " unless you say otherwise."}`);
+  lines.push(`Reply "yes" to save, or tell me changes like "Sam paid", "2 is mine", or "split with Sam only". "cancel" to drop it.`);
   return lines.join("\n");
 }
 
@@ -188,8 +243,9 @@ export function handleReceiptReply(ctx: ReceiptContext, text: string): string | 
 
   const bad = r.assign.filter((a) => a.index < 1 || a.index > p.items.length).map((a) => a.index);
   if (bad.length) return `The receipt only has items 1 to ${p.items.length}. Which did you mean?`;
-  for (const a of r.assign) p.items[a.index - 1]!.ownerId = a.ownerId;
+  for (const a of r.assign) p.items[a.index - 1]!.owners = a.owners;
   if (r.buyerId !== undefined) p.buyerId = r.buyerId;
+  if (r.splitAmong !== undefined) p.splitAmong = r.splitAmong;
   if (r.totalCents !== undefined) {
     const computed = p.totalCents + p.diffCents;
     p.totalCents = r.totalCents;
@@ -207,15 +263,21 @@ export function handleReceiptReply(ctx: ReceiptContext, text: string): string | 
 function commitReceipt(ctx: ReceiptContext, p: PendingReceipt, allowDuplicate: boolean): string {
   const name = (id: number) => ctx.members.find((m) => m.id === id)?.name ?? "someone";
   if (p.totalCents <= 0) return `I couldn't read a total. Reply "total is $X" with the amount you paid.`;
-  const memberIds = ctx.members.map((m) => m.id);
-  if (!memberIds.includes(p.buyerId)) memberIds.push(p.buyerId);
+  const allocations = allocate(p.items, p.totalCents);
+  if (p.splitAmong) {
+    // The rest goes only to the people sharing it (the buyer pays nothing if they're not among them).
+    const rest = p.totalCents - allocations.reduce((s, a) => s + a.amountCents, 0);
+    if (rest > 0) allocations.push({ amountCents: rest, memberIds: p.splitAmong });
+  }
+  const memberIds = [...new Set([p.buyerId, ...(p.splitAmong ?? ctx.members.map((m) => m.id)), ...allocations.flatMap((a) => a.memberIds)])];
 
   let expense;
   try {
     expense = recordExpense(ctx.db, {
       householdId: ctx.householdId,
       tz: ctx.tz,
-      spec: { totalCents: p.totalCents, buyerId: p.buyerId, memberIds, allocations: allocate(p.items, p.totalCents) },
+      spec: { totalCents: p.totalCents, buyerId: p.buyerId, memberIds, allocations },
+      loggedById: ctx.member.id,
       description: p.store ? `${p.store} receipt` : "receipt",
       source: "receipt",
       sourceMessageId: ctx.messageId,
@@ -240,7 +302,8 @@ function commitReceipt(ctx: ReceiptContext, p: PendingReceipt, allowDuplicate: b
       householdId: ctx.householdId,
       name: it.name,
       buyerId: p.buyerId,
-      ownerId: it.ownerId,
+      // One owner: theirs (reminders go to their DM). Several or none: shared in the fridge list.
+      ownerId: it.owners?.length === 1 ? it.owners[0]! : null,
       state: "raw",
       priceCents: it.cents,
       costSource: "receipt",

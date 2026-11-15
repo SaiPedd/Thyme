@@ -200,4 +200,8 @@ ALTER TABLE sends ADD COLUMN reply_to TEXT;
   `
 ALTER TABLE members ADD COLUMN named INTEGER NOT NULL DEFAULT 1;
 `,
+  // 4: who logged an expense (may differ from the buyer: "Sam paid"), so the logger can undo it.
+  `
+ALTER TABLE expenses ADD COLUMN logged_by_member_id INTEGER REFERENCES members(id);
+`,
 ];

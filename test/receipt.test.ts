@@ -115,13 +115,13 @@ describe("checking the math", () => {
 
   test("allocation: kept items carry their share of tax, and shares always sum to the total", () => {
     const r = checkReceipt(TJ);
-    r.items[1]!.ownerId = 1; // chicken is Alex's
+    r.items[1]!.owners = [1]; // chicken is Alex's
     const alloc = allocate(r.items, r.totalCents);
     expect(alloc).toEqual([{ amountCents: 899 + Math.floor((84 * 899) / 1926), memberIds: [1] }]);
 
     // Property: random receipts, random owners, the split always sums exactly.
     for (let n = 0; n < 1000; n++) {
-      const items = Array.from({ length: 1 + (n % 7) }, (_, i) => ({ name: `i${i}`, cents: 1 + ((n * 37 + i * 101) % 2000), ownerId: (n + i) % 3 === 0 ? 1 + ((n + i) % 3) : null }));
+      const items = Array.from({ length: 1 + (n % 7) }, (_, i) => ({ name: `i${i}`, cents: 1 + ((n * 37 + i * 101) % 2000), owners: (n + i) % 3 === 0 ? [1 + ((n + i) % 3)] : (n + i) % 5 === 0 ? [2, 3] : null }));
       const subtotal = items.reduce((s, i) => s + i.cents, 0);
       const total = Math.max(1, subtotal + ((n % 11) - 5) * 13);
       const { shares } = computeSplit({ totalCents: total, buyerId: 1, memberIds: [1, 2, 3], allocations: allocate(items, total) });
@@ -140,9 +140,20 @@ describe("replies: who paid, whose items", () => {
     expect(parseReceiptReply("I paid", members, 2)).toMatchObject({ buyerId: 2 });
     expect(parseReceiptReply("yes, 2 is mine and 3 and 4 are Sam's", members, 1)).toMatchObject({
       confirm: true,
-      assign: [{ index: 2, ownerId: 1 }, { index: 3, ownerId: 2 }, { index: 4, ownerId: 2 }],
+      assign: [{ index: 2, owners: [1] }, { index: 3, owners: [2] }, { index: 4, owners: [2] }],
     });
-    expect(parseReceiptReply("2 is shared", members, 1)).toMatchObject({ assign: [{ index: 2, ownerId: null }] });
+    expect(parseReceiptReply("2 is shared", members, 1)).toMatchObject({ assign: [{ index: 2, owners: null }] });
+    expect(parseReceiptReply("5 is me and Sam's", members, 1)).toMatchObject({ assign: [{ index: 5, owners: [1, 2] }] });
+    expect(parseReceiptReply("2 is mine and Sam paid", members, 1)).toMatchObject({ buyerId: 2, assign: [{ index: 2, owners: [1] }] });
+  });
+
+  test("parses who shares the rest of the receipt", () => {
+    expect(parseReceiptReply("split with Sam only", members, 1)).toMatchObject({ splitAmong: [1, 2] });
+    expect(parseReceiptReply("split between Sam and Jordan", members, 1)).toMatchObject({ splitAmong: [2, 3] });
+    expect(parseReceiptReply("yes, just me and Jordan", members, 1)).toMatchObject({ confirm: true, splitAmong: [1, 3] });
+    expect(parseReceiptReply("split it evenly", members, 1)).toMatchObject({ splitAmong: null });
+    expect(parseReceiptReply("split with Sam, 2 is mine", members, 1)).toMatchObject({ splitAmong: [1, 2], assign: [{ index: 2, owners: [1] }] });
+    expect(parseReceiptReply("split with Riley", members, 1)?.error).toContain("Riley");
     expect(parseReceiptReply("total is $20.15", members, 1)).toMatchObject({ totalCents: 2015 });
     expect(parseReceiptReply("cancel", members, 1)).toMatchObject({ cancel: true });
     expect(parseReceiptReply("Riley paid", members, 1)?.error).toContain("Riley");
@@ -209,8 +220,8 @@ describe("receipt flow through the router", () => {
     expect(items.find((i) => i.name === "chicken thighs")).toMatchObject({ cost_cents: 899, owner_member_id: 3, buyer_member_id: 2 });
     expect(getPendingReceipt(db, 1)).toBeNull();
 
-    // Undo removes the expense.
-    expect(await say(PHONES[1]!, "undo")).toContain("$20.10 expense is removed");
+    // The person who sent the receipt can undo it, even though Sam paid.
+    expect(await say(PHONES[0]!, "undo")).toContain("$20.10 expense is removed");
   });
 
   test("non-food lines count toward the bill but stay out of the fridge; store numbers are dropped", async () => {
@@ -221,6 +232,42 @@ describe("receipt flow through the router", () => {
     expect(saved).toContain("Saved: $20.20");
     expect(saved).toContain("Not added to the fridge (not food): bag fee.");
     expect(db.query("SELECT COUNT(*) AS n FROM items WHERE name LIKE '%bag%'").get()).toEqual({ n: 0 });
+  });
+
+  test("split with only some roommates; an item shared by two stays shared in the fridge", async () => {
+    setNow(T0);
+    const { db, say } = await app(async () => TJ);
+    await say(PHONES[0]!, "", true);
+    expect(await say(PHONES[0]!, "4 is me and Sam's, split between Alex and Jordan")).toContain("The rest is split between Alex and Jordan.");
+    const saved = await say(PHONES[0]!, "yes");
+    expect(saved).toContain("Saved: $20.10 paid by Alex.");
+    const share = (id: number) => db.query<{ s: number }, [number]>("SELECT share_cents AS s FROM expense_shares WHERE member_id = ?").get(id)?.s ?? 0;
+    const eggs = 449 + Math.floor((84 * 449) / 1926); // item 4, split by Alex and Sam
+    const rest = 2010 - eggs;
+    expect(share(2)).toBe(Math.floor(eggs / 2)); // Sam: half the eggs, none of the rest
+    expect(share(3)).toBe(Math.floor(rest / 2)); // Jordan: half the rest, no eggs
+    expect(share(1) + share(2) + share(3)).toBe(2010);
+    const eggsRow = db.query<{ owner_member_id: number | null }, []>("SELECT owner_member_id FROM items WHERE name = 'eggs' AND cost_source = 'receipt'").get();
+    expect(eggsRow).toEqual({ owner_member_id: null });
+  });
+
+  test("the buyer pays nothing when the rest is split between others", async () => {
+    setNow(T0);
+    const { db, say } = await app(async () => TJ);
+    await say(PHONES[0]!, "", true);
+    await say(PHONES[0]!, "Sam paid, split between me and Jordan");
+    await say(PHONES[0]!, "yes");
+    const sam = db.query<{ s: number }, []>("SELECT share_cents AS s FROM expense_shares WHERE member_id = 2").get();
+    expect(sam?.s ?? 0).toBe(0);
+    expect(balancesFor(db, 1, 2).netCents).toBe(2010);
+  });
+
+  test("a video in the group gets no reply", async () => {
+    setNow(T0);
+    const { say } = await app(async () => {
+      throw new ReceiptError("not_image");
+    });
+    expect(await say(PHONES[0]!, "", true)).toBe("");
   });
 
   test("a second identical receipt the same day asks before saving", async () => {

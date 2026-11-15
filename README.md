@@ -49,8 +49,9 @@ Thyme:  Cooked rice lasts 4-6 days in the fridge according to the USDA FoodKeepe
   is me and Sam"), or fixed amounts ("Sam owes 8"). Also undo, duplicate detection, and balances
   that net out across everything.
 - **Receipt photos:** send a photo of a grocery receipt. Thyme reads the items, tax, and total, checks that
-  they add up, and shows the list. Reply "Sam paid" if someone else bought it, "2 is mine" or "3 and 4 are
-  Jordan's" for items that aren't shared, then "yes". It splits the bill (each kept item carries its share of tax)
+  they add up, and shows the list. Reply "Sam paid" if someone else bought it, "2 is mine", "3 and 4 are
+  Jordan's", or "5 is me and Sam's" for items that aren't for everyone, "split with Sam only" or "split between
+  me and Jordan" if not the whole house is in on it, then "yes". Whoever sent the receipt can "undo" it. It splits the bill (each kept item carries its share of tax)
   and adds the food to the fridge list with the real prices. Nothing is saved before "yes", and the photo is never stored.
 - **Roommates and names:** whoever is in the household group becomes a roommate. Thyme asks each person
   their name once and welcomes anyone added later.
@@ -127,7 +128,7 @@ bun run seed             # one household + a starting fridge; roommates join fro
 bun run seed --demo      # fictional roommates (Alex, Sam, Jordan) for the terminal chat
 bun run chat             # talk to Thyme in the terminal (/as <name>, /group, /dm, /photo <path>); sends no real messages
 bun start                # run Thyme on Claw Messenger (real iMessage)
-bun test                 # 152 tests
+bun test                 # 156 tests
 bun run typecheck
 ```
 

@@ -4,7 +4,7 @@
 
 import type { Database } from "bun:sqlite";
 import { formatCents, parseCents } from "../domain/money";
-import { balancesFor, DuplicateExpenseError, recordExpense, undoLastExpense } from "../domain/expenses";
+import { balancesFor, DuplicateExpenseError, LOGGED_BY, recordExpense, undoLastExpense } from "../domain/expenses";
 import { searchShelfLife, type ShelfLifeRow, type Storage } from "../domain/foodkeeper";
 import { claimItem, claimTime, claimWinner } from "../domain/claims";
 import { now } from "../clock";
@@ -161,6 +161,7 @@ const recordExpenseTool: ToolDef = {
         description: input.description,
         sourceMessageId: ctx.messageId,
         allowDuplicate: input.confirm_duplicate === true,
+        loggedById: ctx.member.id,
       });
       const payer = nameOf(ctx, e.buyerId);
       const payerShare = e.shares.find((s) => s.memberId === e.buyerId)?.cents ?? 0;
@@ -195,7 +196,7 @@ const undoTool: ToolDef = {
   run(_input, ctx) {
     const expense = ctx.db
       .query<{ created_at: string }, [number, number]>(
-        "SELECT created_at FROM expenses WHERE household_id = ? AND buyer_member_id = ? AND undone_at IS NULL ORDER BY id DESC LIMIT 1",
+        `SELECT created_at FROM expenses WHERE household_id = ? AND ${LOGGED_BY} = ? AND undone_at IS NULL ORDER BY id DESC LIMIT 1`,
       )
       .get(ctx.household.id, ctx.member.id);
     const toss = lastToss(ctx.db, ctx.household.id, ctx.member.id);

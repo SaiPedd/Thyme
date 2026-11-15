@@ -187,8 +187,8 @@ export async function readReceipt(
 export interface ReceiptLine {
   name: string;
   cents: number;
-  /** null = shared with the household. */
-  ownerId: number | null;
+  /** Who this line is for: one person (theirs), a few (shared by them), or null (the whole split). */
+  owners: number[] | null;
 }
 
 export interface CheckedReceipt {
@@ -236,7 +236,7 @@ export function checkReceipt(raw: RawReceipt): CheckedReceipt {
       dropped++;
       continue;
     }
-    items.push({ name, cents, ownerId: null });
+    items.push({ name, cents, owners: null });
   }
   const itemsCents = items.reduce((s, i) => s + i.cents, 0);
   const taxCents = raw.tax ? (parseCents(raw.tax) ?? 0) : 0;
@@ -257,19 +257,23 @@ export function checkReceipt(raw: RawReceipt): CheckedReceipt {
 }
 
 /**
- * Per-person allocations for items someone kept: each kept item's price plus its proportional share
- * of (total - item subtotal), i.e. tax minus discounts, rounded down. Everything left over is
- * split equally by computeSplit, which guarantees the shares sum to the total.
+ * Allocations for items that belong to specific people: each item's price plus its proportional share
+ * of (total - item subtotal), i.e. tax minus discounts, rounded down, grouped by who it's for.
+ * Everything left over is split by computeSplit, which guarantees the shares sum to the total.
  */
 export function allocate(items: ReceiptLine[], totalCents: number): { amountCents: number; memberIds: number[] }[] {
   const itemsCents = items.reduce((s, i) => s + i.cents, 0);
   if (itemsCents <= 0) return [];
   const adjust = totalCents - itemsCents;
-  const byOwner = new Map<number, number>();
+  const byOwners = new Map<string, { amountCents: number; memberIds: number[] }>();
   for (const i of items) {
-    if (i.ownerId === null) continue;
+    if (!i.owners?.length) continue;
+    const ids = [...new Set(i.owners)].sort((a, b) => a - b);
+    const k = ids.join(",");
     const share = Math.max(0, i.cents + Math.floor((adjust * i.cents) / itemsCents));
-    byOwner.set(i.ownerId, (byOwner.get(i.ownerId) ?? 0) + share);
+    const cur = byOwners.get(k) ?? { amountCents: 0, memberIds: ids };
+    cur.amountCents += share;
+    byOwners.set(k, cur);
   }
-  return [...byOwner].map(([id, amountCents]) => ({ amountCents, memberIds: [id] }));
+  return [...byOwners.values()];
 }

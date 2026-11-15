@@ -35,6 +35,8 @@ export function recordExpense(
     sourceMessageId?: string;
     /** Skip the duplicate check (the user confirmed it really is a second purchase). */
     allowDuplicate?: boolean;
+    /** Who logged it, if not the buyer ("Sam paid"). Lets that person undo it. */
+    loggedById?: number;
   },
 ): RecordedExpense {
   const { spec } = input;
@@ -51,11 +53,11 @@ export function recordExpense(
 
   const id = db.transaction(() => {
     const row = db
-      .query<{ id: number }, [number, number, number, string, string | null, string, string, string | null, string]>(
-        `INSERT INTO expenses (household_id, buyer_member_id, total_cents, mode, description, source, dedupe_hash, source_message_id, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING id`,
+      .query<{ id: number }, [number, number, number, string, string | null, string, string, string | null, string, number]>(
+        `INSERT INTO expenses (household_id, buyer_member_id, total_cents, mode, description, source, dedupe_hash, source_message_id, created_at, logged_by_member_id)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING id`,
       )
-      .get(input.householdId, spec.buyerId, spec.totalCents, mode, input.description ?? null, input.source ?? "text", hash, input.sourceMessageId ?? null, at)!;
+      .get(input.householdId, spec.buyerId, spec.totalCents, mode, input.description ?? null, input.source ?? "text", hash, input.sourceMessageId ?? null, at, input.loggedById ?? spec.buyerId)!;
     for (const [memberId, cents] of shares) {
       db.run("INSERT INTO expense_shares (expense_id, member_id, share_cents) VALUES (?, ?, ?)", [row.id, memberId, cents]);
     }
@@ -78,12 +80,15 @@ export function recordExpense(
   };
 }
 
+/** Expenses this member can undo: ones they logged (older rows without a logger: ones they paid for). */
+export const LOGGED_BY = "COALESCE(logged_by_member_id, buyer_member_id)";
+
 /** Undo the most recent active expense logged by this member. Returns it, or null if none. */
 export function undoLastExpense(db: Database, householdId: number, memberId: number): { id: number; totalCents: number } | null {
   const last = db
     .query<{ id: number; total_cents: number }, [number, number]>(
       `SELECT id, total_cents FROM expenses
-        WHERE household_id = ? AND buyer_member_id = ? AND undone_at IS NULL
+        WHERE household_id = ? AND ${LOGGED_BY} = ? AND undone_at IS NULL
         ORDER BY id DESC LIMIT 1`,
     )
     .get(householdId, memberId);
