@@ -4,8 +4,8 @@
 import type { Database } from "bun:sqlite";
 import { now } from "../clock";
 import { localDate } from "./expenses";
+import { recordLedger } from "./ledger";
 import { defaultStorage, expiryFor, getShelfLife, pickShelfLife, shelfLifeNote, type ShelfLifeRow, type Storage } from "./foodkeeper";
-import { estimatePriceCents } from "./prices";
 
 /** Items expiring within this window are "at risk": reminders, claims, and rescues. */
 export const AT_RISK_MS = 48 * 60 * 60 * 1000;
@@ -56,8 +56,8 @@ export function addItem(db: Database, input: AddItemInput): AddItemResult {
   const storage = input.storage ?? defaultStorage(row);
   const at = now();
   const expires = expiryFor(row, storage, at);
-  const estimate = input.priceCents == null ? estimatePriceCents(input.name) : null;
-  const cost = input.priceCents ?? estimate;
+  // Prices come only from what a roommate said they paid (or, later, a receipt). Never estimated.
+  const cost = input.priceCents ?? null;
   const item = db
     .query<Item, [number, string, number, string, number | null, number, number | null, string | null, string, string | null]>(
       `INSERT INTO items (household_id, name, shelf_life_id, storage, owner_member_id, buyer_member_id, qty, cost_cents, cost_source, added_at, expires_at, status)
@@ -71,11 +71,16 @@ export function addItem(db: Database, input: AddItemInput): AddItemResult {
       input.ownerId,
       input.buyerId,
       cost,
-      cost === null ? null : input.priceCents != null ? "user" : "estimate",
+      cost === null ? null : "user",
       at.toISOString(),
       expires?.toISOString() ?? null,
     )!;
   return { ok: true, item, food: foodLabel(row), note: expires ? null : shelfLifeNote(row, storage) };
+}
+
+/** Set an item's price from what a roommate said they paid, or from a receipt. */
+export function setItemPrice(db: Database, itemId: number, cents: number, source: "user" | "receipt"): void {
+  db.run("UPDATE items SET cost_cents = ?, cost_source = ? WHERE id = ?", [cents, source, itemId]);
 }
 
 /** Whole local days from today until the expiry date (0 = today, negative = past). */
@@ -162,10 +167,17 @@ export function findItem(db: Database, householdId: number, memberId: number, ph
   return matchItem(visibleItems(db, householdId, memberId, opts), phrase);
 }
 
-/** Mark an item used or tossed, and close any open reminder for it. */
-export function setItemStatus(db: Database, itemId: number, status: "used" | "tossed"): void {
+/**
+ * Mark an item used or tossed, close any open reminder for it, and write the waste ledger:
+ * tossed = wasted; used while at risk (within 48h) and not past its date = rescued.
+ * `by` is the member who did it.
+ */
+export function setItemStatus(db: Database, itemId: number, status: "used" | "tossed", by: number | null = null): void {
   const at = now().toISOString();
   db.transaction(() => {
+    const item = db.query<Item, [number]>("SELECT * FROM items WHERE id = ? AND status = 'fresh'").get(itemId);
+    if (item && status === "tossed") recordLedger(db, item, "wasted", by);
+    else if (item && isAtRisk(item) && !isPast(item)) recordLedger(db, item, "rescued", by);
     db.run("UPDATE items SET status = ?, status_at = ? WHERE id = ?", [status, at, itemId]);
     db.run("UPDATE nudges SET responded_at = ? WHERE item_id = ? AND responded_at IS NULL", [at, itemId]);
   })();

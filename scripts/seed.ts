@@ -53,13 +53,14 @@ db.transaction(() => {
 })();
 
 // Starting inventory. Expiry comes from FoodKeeper (conservative low end), never typed in here.
+// No prices: an item's price only comes from a roommate saying what they paid (or a receipt).
 const shelf = (id: number) => db.query<ShelfLifeRow, [number]>("SELECT * FROM shelf_life WHERE id = ?").get(id)!;
-const items: { query: string; name: string; storage: Storage; owner: number | null; buyer: number; cents: number; boughtDaysAgo: number }[] = [
-  { query: "bagged greens spinach", name: "baby spinach", storage: "fridge", owner: null, buyer: 1, cents: 399, boughtDaysAgo: 0 },
-  { query: "chicken parts thighs", name: "chicken thighs", storage: "fridge", owner: 1, buyer: 1, cents: 900, boughtDaysAgo: 0 },
-  { query: "eggs in shell", name: "eggs", storage: "fridge", owner: null, buyer: 2, cents: 449, boughtDaysAgo: 3 },
-  { query: "rice white", name: "rice", storage: "pantry", owner: null, buyer: 2, cents: 299, boughtDaysAgo: 10 },
-  { query: "bananas", name: "bananas", storage: "fridge", owner: null, buyer: 3, cents: 179, boughtDaysAgo: 0 },
+const items: { query: string; name: string; storage: Storage; owner: number | null; buyer: number; boughtDaysAgo: number }[] = [
+  { query: "bagged greens spinach", name: "baby spinach", storage: "fridge", owner: null, buyer: 1, boughtDaysAgo: 0 },
+  { query: "chicken parts thighs", name: "chicken thighs", storage: "fridge", owner: 1, buyer: 1, boughtDaysAgo: 0 },
+  { query: "eggs in shell", name: "eggs", storage: "fridge", owner: null, buyer: 2, boughtDaysAgo: 3 },
+  { query: "rice white", name: "rice", storage: "pantry", owner: null, buyer: 2, boughtDaysAgo: 10 },
+  { query: "bananas", name: "bananas", storage: "fridge", owner: null, buyer: 3, boughtDaysAgo: 0 },
 ];
 for (const it of items) {
   const match = searchShelfLife(db, it.query, 1)[0];
@@ -67,10 +68,10 @@ for (const it of items) {
   const expires = match ? expiryFor(shelf(match.id), it.storage, added) : null;
   db.run(
     `INSERT INTO items (household_id, name, shelf_life_id, storage, owner_member_id, buyer_member_id, qty, cost_cents, cost_source, added_at, expires_at, status)
-     VALUES (1, ?, ?, ?, ?, ?, 1, ?, 'estimate', ?, ?, 'fresh')`,
+     VALUES (1, ?, ?, ?, ?, ?, 1, NULL, NULL, ?, ?, 'fresh')`,
     // Without seeded roommates, starting items are shared and have no recorded buyer.
     [it.name, match?.id ?? null, it.storage, it.owner !== null && memberIds.has(it.owner) ? it.owner : null,
-      memberIds.has(it.buyer) ? it.buyer : null, it.cents, added.toISOString(), expires?.toISOString() ?? null],
+      memberIds.has(it.buyer) ? it.buyer : null, added.toISOString(), expires?.toISOString() ?? null],
   );
 }
 

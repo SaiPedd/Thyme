@@ -11,10 +11,11 @@ export type Intent =
   | { kind: "expense"; total: string; ways?: number; mineItems: { description: string; amount: string }[] }
   | { kind: "undo" }
   | { kind: "balances" }
-  | { kind: "add"; items: string[] }
+  | { kind: "add"; items: { name: string; price?: string }[] }
   | { kind: "use"; item: string }
   | { kind: "toss"; item: string }
   | { kind: "inventory" }
+  | { kind: "waste" }
   | { kind: "claim"; item?: string }
   | { kind: "recipe"; another?: boolean }
   | { kind: "cooked" }
@@ -29,11 +30,18 @@ const WORDS: Record<string, number> = { two: 2, three: 3, four: 4, five: 5, six:
 /** Words that follow "got" but aren't food ("got it", "got home"). */
 const NOT_FOOD = new Set(["it", "this", "that", "them", "you", "home", "back", "here", "there", "paid", "time", "one", "nothing", "everything", "him", "her", "people", "mondays"]);
 
-function splitList(s: string): string[] {
+/** A price the person said they paid, after an item: "spinach for $4", "spinach ($4)", "spinach $4". */
+const ITEM_PRICE = /^(.*?)\s*(?:\(\s*(\$\s?\d+(?:\.\d{1,2})?)\s*\)|(?:for\s+)?(\$\s?\d+(?:\.\d{1,2})?))$/i;
+
+function splitList(s: string): { name: string; price?: string }[] {
   return s
     .split(/,|\band\b|&|\+/i)
-    .map((x) => x.replace(/^\s*(some|a|an|the)\s+/i, "").replace(/[.!?]+$/, "").trim())
-    .filter((x) => x && !NOT_FOOD.has(x.toLowerCase()));
+    .map((x) => x.replace(/^\s*(some|a|an|the)\s+/i, "").replace(/[!?]+$/, "").replace(/\.$/, "").trim())
+    .map((x) => {
+      const m = x.match(ITEM_PRICE);
+      return m && m[1]!.trim() ? { name: m[1]!.trim(), price: (m[2] ?? m[3])!.replace(/\s/g, "") } : { name: x };
+    })
+    .filter((x) => x.name && !NOT_FOOD.has(x.name.toLowerCase()));
 }
 
 const cleanItem = (s: string) => s.replace(/[.!?]+$/, "").trim();
@@ -84,6 +92,9 @@ export function parseIntent(raw: string, botName = ""): Intent | null {
   p = t.match(/^(?:is|are) (?:the |my |our |this |that )?(.+?) (?:still )?(?:good|ok|okay|safe|fine)(?: to eat)?\b|^how long (?:does|do|will|can) (?:the |my |our )?(.+?) (?:last|keep|stay good)\b|^(?:has|have) (?:the |my )?(.+?) gone bad\b/);
   if (p) return { kind: "check", item: cleanItem(p[1] ?? p[2] ?? p[3]!) };
 
+  if (/\bhow much (food )?(have|did|do) (we|i) (waste|wasted|throw out|thrown out|toss|tossed)\b|\bwhat (have|did) we (waste|wasted|throw out|toss)\b|\bwaste (report|summary|ledger|stats)\b/.test(t)) {
+    return { kind: "waste" };
+  }
   if (/\b(what'?s|what is|whats)\s+(in\s+(the\s+|our\s+)?(fridge|pantry|freezer|kitchen)|expiring|going bad)|\bwhat (food )?do we have\b|\binventory\b/.test(t)) {
     return { kind: "inventory" };
   }
@@ -136,7 +147,23 @@ export function describeToolResult(name: string, r: Record<string, any>): string
       if (!r.done) return `I don't see that in the fridge list.`;
       return r.rescued ? `Nice save! The ${r.item} was about to expire. Marked as used.` : `Marked the ${r.item} as used.`;
     case "log_toss":
-      return r.done ? `Marked the ${r.item} as tossed.` : `I don't see that in the fridge list.`;
+      if (!r.done) return `I don't see that in the fridge list.`;
+      return r.wasted_cost ? `Marked the ${r.item} as tossed (${r.wasted_cost} of food wasted).` : `Marked the ${r.item} as tossed.`;
+    case "get_waste_summary": {
+      type T = { items: number; known_cost: string; items_with_no_price?: number };
+      const part = (label: string, t: T) =>
+        `${label} ${t.items} item${t.items === 1 ? "" : "s"}` +
+        (t.items ? ` (${t.known_cost}${t.items_with_no_price ? `, plus ${t.items_with_no_price} with no price` : ""})` : "");
+      const period = (label: string, p: { wasted: T; rescued: T }) => `${label}: ${part("wasted", p.wasted)}, ${part("rescued", p.rescued)}.`;
+      const h = r.household as { this_week: { wasted: T; rescued: T }; all_time: { wasted: T; rescued: T } };
+      const y = r.yours as typeof h | undefined;
+      return [
+        "Household food waste:",
+        period("This week", h.this_week),
+        period("All time", h.all_time),
+        ...(y ? ["Your own items:", period("This week", y.this_week), period("All time", y.all_time)] : []),
+      ].join("\n");
+    }
     case "get_inventory": {
       const fmt = (xs: { item: string; status: string }[]) => xs.map((x) => `- ${x.item}: ${x.status}`);
       const shared = (r.shared as { item: string; status: string }[] | undefined) ?? [];
@@ -225,13 +252,18 @@ export function runFallback(text: string, ctx: ToolContext, botName = ""): strin
     }
     case "add":
       // Things someone says they got are groceries, so raw.
-      return describeToolResult("add_item", runTool("add_item", { items: intent.items.map((name) => ({ name, state: "raw" })) }, ctx));
+      return describeToolResult(
+        "add_item",
+        runTool("add_item", { items: intent.items.map((i) => ({ name: i.name, state: "raw", ...(i.price ? { price: i.price } : {}) })) }, ctx),
+      );
     case "use":
       return describeToolResult("use_item", runTool("use_item", { item: intent.item }, ctx));
     case "toss":
       return describeToolResult("log_toss", runTool("log_toss", { item: intent.item }, ctx));
     case "inventory":
       return describeToolResult("get_inventory", runTool("get_inventory", {}, ctx));
+    case "waste":
+      return describeToolResult("get_waste_summary", runTool("get_waste_summary", {}, ctx));
     case "claim":
       return describeToolResult("claim_item", runTool("claim_item", intent.item ? { item: intent.item } : {}, ctx));
     case "recipe":

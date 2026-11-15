@@ -7,6 +7,7 @@ import { formatCents, parseCents } from "../domain/money";
 import { balancesFor, DuplicateExpenseError, recordExpense, undoLastExpense } from "../domain/expenses";
 import { searchShelfLife, type ShelfLifeRow, type Storage } from "../domain/foodkeeper";
 import { claimItem, claimTime, claimWinner } from "../domain/claims";
+import { wasteSummary, type LedgerTotals } from "../domain/ledger";
 import { now } from "../clock";
 import { forgetMember, prefsFor, removePref, savePref, type PrefKind } from "../domain/prefs";
 import { pickRecipes, uncheckedDiets, validateRecipe, type RecipeCheck } from "../domain/recipes";
@@ -18,6 +19,7 @@ import {
   isPast,
   itemNote,
   matchItem,
+  setItemPrice,
   setItemStatus,
   visibleItems,
   type Item,
@@ -83,6 +85,23 @@ function resolveMany(ctx: ToolContext, names: string[] | undefined, fallback: nu
   return ids;
 }
 
+/**
+ * An expense line item ("chicken thighs ($9)") is what the buyer paid for that food, so it becomes
+ * the price of the matching fridge item: fresh, visible to the buyer, and not priced yet.
+ */
+function priceItemsFromLines(ctx: ToolContext, buyerId: number, lines: { description: string; cents: number }[]): string[] {
+  let candidates = visibleItems(ctx.db, ctx.household.id, buyerId).filter((i) => i.cost_cents === null);
+  const named: string[] = [];
+  for (const line of lines) {
+    const item = matchItem(candidates, line.description);
+    if (!item) continue;
+    setItemPrice(ctx.db, item.id, line.cents, "user");
+    candidates = candidates.filter((c) => c.id !== item.id);
+    named.push(item.name);
+  }
+  return named;
+}
+
 const recordExpenseTool: ToolDef = {
   name: "record_expense",
   description:
@@ -134,12 +153,14 @@ const recordExpenseTool: ToolDef = {
     if ("error" in among) return among;
 
     const allocations: NonNullable<SplitSpec["allocations"]> = [];
+    const lines: { description: string; cents: number }[] = [];
     for (const item of (input.items ?? []) as { description: string; amount: string; members: string[] }[]) {
       const cents = parseCents(item.amount);
       if (cents === null) return { error: `couldn't read the amount for ${item.description}` };
       const ids = resolveMany(ctx, item.members, [ctx.member.id]);
       if ("error" in ids) return ids;
       allocations.push({ amountCents: cents, memberIds: ids });
+      lines.push({ description: String(item.description ?? ""), cents });
     }
     const fixed: NonNullable<SplitSpec["fixed"]> = [];
     for (const f of (input.fixed ?? []) as { member: string; amount: string }[]) {
@@ -161,6 +182,7 @@ const recordExpenseTool: ToolDef = {
       });
       const payer = nameOf(ctx, e.buyerId);
       const payerShare = e.shares.find((s) => s.memberId === e.buyerId)?.cents ?? 0;
+      const pricesSet = priceItemsFromLines(ctx, e.buyerId, lines);
       return {
         recorded: true,
         expense_id: e.id,
@@ -174,6 +196,7 @@ const recordExpenseTool: ToolDef = {
           .map((s) => `${nameOf(ctx, s.memberId)} owes ${payer} ${formatCents(s.cents)}`),
         payer_own_share: `${payer}'s own share is ${formatCents(payerShare)} (already paid)`,
         how_to_fix: "Reply \"undo\" to remove it, then send the corrected message.",
+        ...(pricesSet.length ? { item_prices_set: pricesSet } : {}),
       };
     } catch (error) {
       if (error instanceof DuplicateExpenseError) {
@@ -197,7 +220,7 @@ const undoTool: ToolDef = {
 
 const balancesTool: ToolDef = {
   name: "get_balances",
-  description: "The sender's balances with roommates (groceries and shared waste combined). Use for \"what do I owe?\" or \"who owes me?\".",
+  description: "The sender's balances with roommates from grocery splits. Use for \"what do I owe?\" or \"who owes me?\". Wasted food never changes balances.",
   input_schema: { type: "object", properties: {}, additionalProperties: false },
   run(_input, ctx) {
     const { netCents, lines } = balancesFor(ctx.db, ctx.household.id, ctx.member.id);
@@ -353,11 +376,43 @@ function statusTool(name: "use_item" | "log_toss", status: "used" | "tossed", de
       const item = findItem(ctx.db, ctx.household.id, ctx.member.id, String(input.item ?? ""));
       if (!item) return { done: false, note: `nothing called "${input.item}" in the fridge list` };
       const rescued = status === "used" && isAtRisk(item) && !isPast(item);
-      setItemStatus(ctx.db, item.id, status);
-      return { done: true, item: item.name, status, ...(rescued ? { rescued: true, note: "It was about to expire: a rescue." } : {}) };
+      setItemStatus(ctx.db, item.id, status, ctx.member.id);
+      // The cost is only shown when someone said what they paid, and never for a personal item in the group.
+      const showCost = status === "tossed" && item.cost_cents !== null && (item.owner_member_id === null || !ctx.isGroup);
+      return {
+        done: true,
+        item: item.name,
+        status,
+        ...(rescued ? { rescued: true, note: "It was about to expire: a rescue." } : {}),
+        ...(showCost ? { wasted_cost: formatCents(item.cost_cents!) } : {}),
+      };
     },
   };
 }
+
+const totalsFacts = (t: LedgerTotals) => ({
+  items: t.count,
+  known_cost: formatCents(t.cents),
+  ...(t.unpriced ? { items_with_no_price: t.unpriced } : {}),
+});
+
+const wasteSummaryTool: ToolDef = {
+  name: "get_waste_summary",
+  description:
+    "How much food the household wasted (tossed) and rescued (ate just before it expired), this week and all time. " +
+    "Costs only count items someone gave a price for; say how many had no price instead of guessing. " +
+    "In the group these are household totals only. Use for \"how much have we wasted?\" or \"waste report\".",
+  input_schema: { type: "object", properties: {}, additionalProperties: false },
+  run(_input, ctx) {
+    const facts = (opts: { sinceDays?: number; ownerId?: number }) => {
+      const s = wasteSummary(ctx.db, ctx.household.id, opts);
+      return { wasted: totalsFacts(s.wasted), rescued: totalsFacts(s.rescued) };
+    };
+    const household = { this_week: facts({ sinceDays: 7 }), all_time: facts({}) };
+    if (ctx.isGroup) return { household, note: "Household totals only. Don't name items or people." };
+    return { household, yours: { this_week: facts({ sinceDays: 7, ownerId: ctx.member.id }), all_time: facts({ ownerId: ctx.member.id }) } };
+  },
+};
 
 const useItemTool = statusTool("use_item", "used", "Mark food as used up or eaten. Use for \"used the X\", \"finished the X\", \"ate the X\", \"I cooked it\".");
 const tossItemTool = statusTool("log_toss", "tossed", "Mark food as thrown out. Use for \"tossed the X\", \"threw out the X\", \"the X went bad\".");
@@ -564,7 +619,7 @@ const cookedTool: ToolDef = {
       if (!pending) return { done: false, note: "Nothing is waiting for confirmation." };
       const items = freshNames(pending.itemIds);
       const rescued = items.filter((i) => isAtRisk(i) && !isPast(i)).map((i) => i.name);
-      for (const i of items) setItemStatus(ctx.db, i.id, "used");
+      for (const i of items) setItemStatus(ctx.db, i.id, "used", ctx.member.id);
       ctx.db.run("DELETE FROM state WHERE key = ?", [`cook:${ctx.member.id}`]);
       return { done: true, title: pending.title, marked_used: items.map((i) => i.name), rescued };
     }
@@ -672,6 +727,7 @@ export const TOOLS: ToolDef[] = [
   addItemTool,
   useItemTool,
   tossItemTool,
+  wasteSummaryTool,
   inventoryTool,
   claimTool,
   suggestRecipeTool,

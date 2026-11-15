@@ -73,7 +73,7 @@ describe("fallback parser", () => {
       ways: 3,
       mineItems: [{ description: "chicken thighs", amount: "$9" }],
     });
-    expect(parseIntent("got chicken, spinach and rice")).toEqual({ kind: "add", items: ["chicken", "spinach", "rice"] });
+    expect(parseIntent("got chicken, spinach and rice")).toEqual({ kind: "add", items: [{ name: "chicken" }, { name: "spinach" }, { name: "rice" }] });
     expect(parseIntent("used the last of the rice")).toEqual({ kind: "use", item: "rice" });
     expect(parseIntent("tossed the milk")).toEqual({ kind: "toss", item: "milk" });
     expect(parseIntent("undo")).toEqual({ kind: "undo" });

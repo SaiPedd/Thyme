@@ -14,9 +14,9 @@ Full build plan: [PLAN.md](PLAN.md).
 | 0 | Claw Messenger spike, config, database schema, USDA FoodKeeper import | Done |
 | 1 | Bun WebSocket integration, Gemini Interactions loop, privacy and outbox | Done |
 | 2 | Expense splitting: split summary, recording expenses, undo, balances | Done |
-| 3 | Inventory and expiry tracking, reminders, claims on expiring food | Next |
-| 4 | Kitchen companion: recipes from what's in the fridge, saved preferences | Planned |
-| 5 | Waste ledger: tosses and rescues, shared waste in the same balances | Planned |
+| 3 | Inventory and expiry tracking, reminders, claims on expiring food | Done |
+| 4 | Kitchen companion: recipes from what's in the fridge, saved preferences | Done (recipe data being replaced with real data) |
+| 5 | Waste ledger: tosses and rescues, tracked (never charged to balances) | Done |
 | 6 | Receipt photos (stretch) | Planned |
 | 7 | Demo polish, eval script | Planned |
 
@@ -53,6 +53,11 @@ Thyme:  Cooked rice lasts 4-6 days in the fridge according to the USDA FoodKeepe
 - **Getting its attention:** say "Thyme" (or an alias from `BOT_ALIASES`) anywhere in a message. In the group
   it also answers questions and clear food or expense logs. Other chatter is kept as context, and Thyme stays quiet.
 - **Shelf life:** answers come from the USDA FoodKeeper table (661 foods), never from the model's memory.
+- **Prices:** an item's price is only what a roommate said they paid ("got spinach for $4", or an expense
+  line like "chicken thighs ($9) are just mine"). No price given means unknown, never estimated.
+- **Waste ledger:** "tossed the spinach" is logged as wasted; eating food within 48h of its date is a rescue.
+  "How much have we wasted?" gives household totals in the group (no items or names) and adds your own items in a DM.
+  Waste is tracked, not charged: balances only come from grocery splits, so nobody pays twice.
 
 ## How it works
 
@@ -115,7 +120,7 @@ bun run seed             # one household + a starting fridge; roommates join fro
 bun run seed --demo      # fictional roommates (Alex, Sam, Jordan) for the terminal chat
 bun run chat             # talk to Thyme in the terminal (/as <name>, /group, /dm); sends no real messages
 bun start                # run Thyme on Claw Messenger (real iMessage)
-bun test                 # 90 tests
+bun test                 # 134 tests
 bun run typecheck
 ```
 
@@ -148,7 +153,7 @@ data/foodkeeper.json     USDA FoodKeeper data
 ## Known limitations
 
 - Receipt photos arrive but aren't read yet (Phase 6).
-- Logging food ("got spinach", "tossed the milk") is recognized but not stored yet (Phase 3).
-- Recipe ideas aren't checked against what's actually in the fridge yet (Phase 4).
+- Waste totals are in dollars and item counts only; CO2 and weight are cut until there's a real, cited dataset.
+- Undoing an expense doesn't clear item prices that its line items set.
 - Group chats need both roommates' numbers registered with Claw first (`bun run register-phones`).
 - Thyme is also a herb, so "we're out of thyme" will get a reply.

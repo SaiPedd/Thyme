@@ -12,7 +12,7 @@ a dollar total, or a recipient. It calls tools, and tools return facts.
 P1. Grocery expense splitting (plaintext; receipt photo is a stretch goal that depends on the spike)
 P2. Inventory and expiry tracker (USDA FoodKeeper), reminders, claims on expiring shared items
 P3. Kitchen companion (open questions, recipes from current inventory, saved preferences)
-P4. Waste ledger (tosses and rescues; shared waste goes into the same balances as grocery splits)
+P4. Waste ledger (tosses and rescues; tracked, never charged to balances, so nobody pays twice for a split item)
 Cut: dinner plans, break mode, weekly digest, dashboard, full onboarding. One seeded household; roommates join
 from the household group chat, and the agent (named by BOT_NAME, default Thyme, plus BOT_ALIASES) asks their names once.
 Do not add other features. Ask me first.
@@ -39,6 +39,7 @@ Channel: Claw Messenger (https://www.clawmessenger.com/docs) behind one adapter 
 - Expiry dates come only from the USDA FoodKeeper table. The model only maps a phrase to a table entry.
   `expires_at` uses the conservative low end. Ask raw or cooked when ambiguous.
 - Money is integer cents. Split shares always sum exactly to the total; leftover cents go to the buyer.
+- Item prices come only from what a roommate said they paid (or a receipt). Never estimate a price; unknown stays NULL.
 - Recipe suggestions must only use ingredients currently in inventory. Validate in code.
 - Food safety answers are conservative. If unsure, say to toss. Never claim a dish is safe for an allergy.
 - The agent loop runs at most 6 tool iterations with a 10 second timeout. On failure or LLM=off, use the rule-based fallback.
