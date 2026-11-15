@@ -9,6 +9,7 @@ import { makeClient } from "./src/agent/loop";
 import { loadConfig, printPreflight } from "./src/config";
 import { openDb } from "./src/db";
 import { ensureShelfLife } from "./src/domain/foodkeeper";
+import { makeMealDbClient } from "./src/domain/mealdb";
 import { getHousehold, getMembers } from "./src/domain/household";
 import { Inbox } from "./src/inbox";
 import { Outbox } from "./src/outbox";
@@ -50,6 +51,7 @@ const router = makeRouter({
   botAliases: config.botAliases,
   model: config.geminiModel,
   client: makeClient({ llm: config.llm, apiKey: config.geminiApiKey }),
+  mealdb: config.mealdb ? makeMealDbClient(config.mealdbApiKey) : null,
   devGroupChatId,
   // Receipt photos: the Claw key is only sent if a plain download is refused; file:// is terminal-only.
   receipts: { apiKey: config.clawApiKey, allowFile: useTerminal },

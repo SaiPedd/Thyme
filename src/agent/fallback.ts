@@ -4,7 +4,7 @@
 // food preferences, "is the X still good?", and "forget me".
 // Uses the same tools as the agent, so facts come from code either way.
 
-import { runTool, type ToolContext } from "./tools";
+import { runToolAsync, type ToolContext } from "./tools";
 import { agree, isPlural } from "../domain/inventory";
 
 export type Intent =
@@ -190,11 +190,29 @@ export function describeToolResult(name: string, r: Record<string, any>): string
       }
       const expiring = (r.uses_food_expiring_soon as string[]) ?? [];
       const allergy = ((r.notes as string[]) ?? []).some((n) => n.startsWith("Saved allergies"));
+      if (r.source === "TheMealDB") {
+        const need = (r.also_need as string[]) ?? [];
+        return [
+          `${r.close_match ? "Closest match I found" : "Try"}: ${r.title}. You have: ${(r.have as string[]).join(", ")}.`,
+          ...(need.length ? [`You'd also need: ${need.join(", ")}.`] : []),
+          ...(expiring.length ? [`It uses up the ${list(expiring)} before ${expiring.length === 1 && !isPlural(expiring[0]!) ? "it goes" : "they go"} bad.`] : []),
+          ...(r.steps as string[]).map((st, i) => `${i + 1}. ${st}`),
+          ...(r.more_steps_at_link ? [`Full recipe: ${r.link}`] : [`Recipe: ${r.link}`]),
+          ...(allergy ? ["I avoided saved allergies by name, but I can't promise any dish is allergy-safe. Check every label."] : []),
+          `${r.credit}. Say "something else" for another idea, or "I made it" when you're done.`,
+        ].join("\n");
+      }
       return [
         `Try ${String(r.title).toLowerCase()}: ${(r.ingredients as string[]).join(", ")}.`,
         ...(expiring.length ? [`It uses up the ${list(expiring)} before ${expiring.length === 1 && !isPlural(expiring[0]!) ? "it goes" : "they go"} bad.`] : []),
         ...(r.steps as string[]).map((st, i) => `${i + 1}. ${st}`),
         ...(allergy ? ["I avoided saved allergies by name, but I can't promise any dish is allergy-safe. Check every label."] : []),
+        ...(r.mealdb_idea
+          ? [(() => {
+              const m = r.mealdb_idea as { title: string; link: string; also_need: string[]; credit: string };
+              return `Or try ${m.title}${m.also_need.length ? ` (you'd also need ${m.also_need.join(", ")})` : ""}: ${m.link} (${m.credit}).`;
+            })()]
+          : []),
         `Say "something else" for another idea, or "I made it" when you're done.`,
       ].join("\n");
     }
@@ -232,48 +250,48 @@ export function describeToolResult(name: string, r: Record<string, any>): string
 const list = (xs: string[]) => (xs.length <= 1 ? (xs[0] ?? "") : `${xs.slice(0, -1).join(", ")} and ${xs.at(-1)}`);
 
 /** Run the intent with the shared tools and word the reply with fixed templates. */
-export function runFallback(text: string, ctx: ToolContext, botName = ""): string | null {
+export async function runFallback(text: string, ctx: ToolContext, botName = ""): Promise<string | null> {
   const intent = parseIntent(text, botName);
   if (!intent) return null;
 
   switch (intent.kind) {
     case "undo":
-      return describeToolResult("undo_last", runTool("undo_last", {}, ctx));
+      return describeToolResult("undo_last", await runToolAsync("undo_last", {}, ctx));
     case "balances":
-      return describeToolResult("get_balances", runTool("get_balances", {}, ctx));
+      return describeToolResult("get_balances", await runToolAsync("get_balances", {}, ctx));
     case "expense": {
       if (intent.ways && intent.ways !== ctx.members.length) {
         return `Who's splitting it? The household has ${ctx.members.length} people (${ctx.members.map((m) => m.name).join(", ")}).`;
       }
-      const r = runTool("record_expense", { total: intent.total, items: intent.mineItems.map((i) => ({ ...i, members: ["me"] })) }, ctx);
+      const r = await runToolAsync("record_expense", { total: intent.total, items: intent.mineItems.map((i) => ({ ...i, members: ["me"] })) }, ctx);
       return describeToolResult("record_expense", r);
     }
     case "add":
       // Things someone says they got are groceries, so raw.
-      return describeToolResult("add_item", runTool("add_item", { items: intent.items.map((name) => ({ name, state: "raw" })) }, ctx));
+      return describeToolResult("add_item", await runToolAsync("add_item", { items: intent.items.map((name) => ({ name, state: "raw" })) }, ctx));
     case "use":
-      return describeToolResult("use_item", runTool("use_item", { item: intent.item }, ctx));
+      return describeToolResult("use_item", await runToolAsync("use_item", { item: intent.item }, ctx));
     case "toss":
-      return describeToolResult("log_toss", runTool("log_toss", { item: intent.item }, ctx));
+      return describeToolResult("log_toss", await runToolAsync("log_toss", { item: intent.item }, ctx));
     case "inventory":
-      return describeToolResult("get_inventory", runTool("get_inventory", {}, ctx));
+      return describeToolResult("get_inventory", await runToolAsync("get_inventory", {}, ctx));
     case "claim":
-      return describeToolResult("claim_item", runTool("claim_item", intent.item ? { item: intent.item } : {}, ctx));
+      return describeToolResult("claim_item", await runToolAsync("claim_item", intent.item ? { item: intent.item } : {}, ctx));
     case "recipe":
-      return describeToolResult("suggest_recipe", runTool("suggest_recipe", intent.another ? { another: true } : {}, ctx));
+      return describeToolResult("suggest_recipe", await runToolAsync("suggest_recipe", intent.another ? { another: true } : {}, ctx));
     case "cooked":
-      return describeToolResult("cooked_recipe", runTool("cooked_recipe", {}, ctx));
+      return describeToolResult("cooked_recipe", await runToolAsync("cooked_recipe", {}, ctx));
     case "confirm":
-      return describeToolResult("cooked_recipe", runTool("cooked_recipe", { confirm: true }, ctx));
+      return describeToolResult("cooked_recipe", await runToolAsync("cooked_recipe", { confirm: true }, ctx));
     case "pref":
-      return describeToolResult("save_preference", runTool("save_preference", { kind: intent.pref, value: intent.value }, ctx));
+      return describeToolResult("save_preference", await runToolAsync("save_preference", { kind: intent.pref, value: intent.value }, ctx));
     case "my_prefs":
-      return describeToolResult("get_preferences", runTool("get_preferences", {}, ctx));
+      return describeToolResult("get_preferences", await runToolAsync("get_preferences", {}, ctx));
     case "forget":
-      return describeToolResult("forget_me", runTool("forget_me", {}, ctx));
+      return describeToolResult("forget_me", await runToolAsync("forget_me", {}, ctx));
     case "check":
-      return describeToolResult("check_item", runTool("check_item", { item: intent.item }, ctx));
+      return describeToolResult("check_item", await runToolAsync("check_item", { item: intent.item }, ctx));
     case "waste":
-      return describeToolResult("get_waste_summary", runTool("get_waste_summary", {}, ctx));
+      return describeToolResult("get_waste_summary", await runToolAsync("get_waste_summary", {}, ctx));
   }
 }
