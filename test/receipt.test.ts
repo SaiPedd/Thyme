@@ -315,3 +315,65 @@ describe("receipt flow through the router", () => {
     expect(await off.say(PHONES[0]!, "", true)).toContain("when the AI is on");
   });
 });
+
+describe("blurry lines, no size limit, DM confirmations", () => {
+  const blur = (i: number) => ({ ...TJ, items: TJ.items.map((it, j) => (j === i ? { name: it.name, price: "", readable: false } : it)) });
+
+  test("one blurry line: its price is worked out from the total, never guessed", () => {
+    const r = checkReceipt({ ...blur(1), items: blur(1).items.map((it, j) => (j === 1 ? { ...it, price: "7.00" } : it)) });
+    const line = r.items.find((i) => i.inferred)!;
+    expect(line).toMatchObject({ name: "chicken thighs", cents: 899 }); // the model's "7.00" on an unreadable line is ignored
+    expect(r.balanced).toBe(true);
+    expect(r.unreadable).toBe(0);
+  });
+
+  test("two or three blurry lines become shared 'other groceries'; more than three asks for help", () => {
+    const two = checkReceipt({ ...TJ, items: TJ.items.map((it, j) => (j < 2 ? { ...it, price: "", readable: false } : it)) });
+    expect(two.items.find((i) => i.unclear)).toMatchObject({ name: "other groceries", cents: 399 + 899, unclear: 2 });
+    expect(two.balanced).toBe(true);
+    const all = checkReceipt({ ...TJ, items: TJ.items.map((it) => ({ ...it, price: "", readable: false })) });
+    expect(all.unreadable).toBe(4);
+    expect(all.items.length).toBe(0);
+  });
+
+  test("no 10 MB limit: a large photo downloads fine", async () => {
+    const big = new Uint8Array(12 * 1024 * 1024);
+    const fetchImpl = (async () => new Response(big, { headers: { "content-type": "image/jpeg", "content-length": String(big.byteLength) } })) as unknown as typeof fetch;
+    const img = await downloadImage({ url: "https://claw/att/big.jpg" }, { fetchImpl });
+    expect(img.bytes.byteLength).toBe(big.byteLength);
+  });
+
+  test("router: blurry line shown, '2 was chicken thighs' names it, then it goes in the fridge", async () => {
+    setNow(T0);
+    const { db, say } = await app(async () => blur(1));
+    const shown = await say(PHONES[0]!, "", true);
+    expect(shown).toContain("2. chicken thighs $8.99 (blurry, worked out from the total)");
+    expect(shown).toContain("Line 2 was blurry. What was it?");
+    expect(await say(PHONES[0]!, "2 was chicken thighs")).toContain("2. chicken thighs $8.99\n");
+    expect(await say(PHONES[0]!, "yes")).toContain("Added 4 items");
+    expect(db.query<{ name: string }, []>("SELECT name FROM items WHERE cost_source = 'receipt'").all().map((i) => i.name)).toContain("chicken thighs");
+  });
+
+  test("an unnamed blurry line counts in the bill but stays out of the fridge; '2 is Sam's' is still an owner change", async () => {
+    setNow(T0);
+    const { db, say } = await app(async () => blur(1));
+    await say(PHONES[0]!, "", true);
+    expect(await say(PHONES[0]!, "2 is Sam's")).toContain("(just Sam's)");
+    expect(await say(PHONES[0]!, "yes")).toContain("Added 3 items");
+    expect(db.query<{ n: number }, []>("SELECT SUM(share_cents) AS n FROM expense_shares").get()!.n).toBe(2010);
+  });
+
+  test("confirmed in a DM: the split is also posted to the group", async () => {
+    setNow(T0);
+    const { adapter } = await app(async () => TJ);
+    const dm = (text: string, photo = false) =>
+      adapter.receive({ from: PHONES[2]!, text, isGroup: false, attachments: photo ? [{ url: "https://claw/att/1", mimeType: "image/jpeg" }] : [] });
+    dm("", true);
+    await new Promise((r) => setTimeout(r, 40));
+    dm("yes");
+    await new Promise((r) => setTimeout(r, 40));
+    const group = adapter.sent.filter((s) => s.destination.kind === "group").map((s) => s.text).join("\n");
+    expect(group).toContain("Jordan logged a Trader Joe's receipt: $20.10 paid by Jordan.");
+    expect(group).toContain("Alex owes Jordan");
+  });
+});

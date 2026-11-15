@@ -7,12 +7,11 @@ import { z } from "zod";
 import type { GeminiLike } from "../agent/loop";
 import { parseCents } from "../domain/money";
 
-export const MAX_IMAGE_BYTES = 10 * 1024 * 1024;
 export const RECEIPT_TIMEOUT_MS = 20_000;
 
 export class ReceiptError extends Error {
   constructor(
-    readonly code: "download" | "not_image" | "too_big" | "timeout" | "unreadable" | "llm",
+    readonly code: "download" | "not_image" | "timeout" | "unreadable" | "llm",
     message: string = code,
   ) {
     super(message);
@@ -50,7 +49,6 @@ export async function downloadImage(att: { url: string; mimeType?: string }, opt
     if (!opts.allowFile) throw new ReceiptError("download", "file attachments are dev-only");
     const file = Bun.file(decodeURIComponent(att.url.slice("file://".length)));
     if (!(await file.exists())) throw new ReceiptError("download", "no such file");
-    if (file.size > MAX_IMAGE_BYTES) throw new ReceiptError("too_big");
     const mime = guessMime(att.mimeType, file.type, att.url);
     if (!mime) throw new ReceiptError("not_image");
     return { bytes: new Uint8Array(await file.arrayBuffer()), mime };
@@ -69,11 +67,8 @@ export async function downloadImage(att: { url: string; mimeType?: string }, opt
   if (!res?.ok) throw new ReceiptError("download");
   const mime = guessMime(att.mimeType, res.headers.get("content-type"), att.url);
   if (!mime) throw new ReceiptError("not_image");
-  const declared = Number(res.headers.get("content-length") ?? 0);
-  if (declared > MAX_IMAGE_BYTES) throw new ReceiptError("too_big");
-  const bytes = new Uint8Array(await res.arrayBuffer());
-  if (bytes.byteLength > MAX_IMAGE_BYTES) throw new ReceiptError("too_big");
-  return { bytes, mime };
+  // No size limit: phone photos are a few MB and only live in memory until Gemini has read them.
+  return { bytes: new Uint8Array(await res.arrayBuffer()), mime };
 }
 
 // ---- Reading (Gemini) and validation (Zod) ----
@@ -81,7 +76,8 @@ export async function downloadImage(att: { url: string; mimeType?: string }, opt
 export const ReceiptSchema = z.object({
   store: z.string().nullish(),
   date: z.string().nullish(),
-  items: z.array(z.object({ name: z.string().min(1), price: z.string().min(1) })).min(1),
+  // price may be "" and readable false for a blurry line: never a guessed number.
+  items: z.array(z.object({ name: z.string(), price: z.string(), readable: z.boolean().nullish() })).min(1),
   discounts: z.string().nullish(),
   tax: z.string().nullish(),
   total: z.string().min(1),
@@ -99,8 +95,8 @@ const RESPONSE_SCHEMA = {
       type: "array",
       items: {
         type: "object",
-        properties: { name: { type: "string" }, price: { type: "string" } },
-        required: ["name", "price"],
+        properties: { name: { type: "string" }, price: { type: "string" }, readable: { type: "boolean" } },
+        required: ["name", "price", "readable"],
       },
     },
     discounts: { type: "string" },
@@ -115,6 +111,7 @@ const PROMPT = `Transcribe this grocery receipt as JSON. Copy text and amounts e
 - store: the store's name only (e.g. "Trader Joe's"), no address or store number.
 - items: one entry per purchased line, with a short plain product name (expand abbreviations like "ORG BNNA" to "organic bananas") and its line price as printed, e.g. "3.99". A discount or coupon line is a negative price like "-1.00".
 - discounts: the total savings line if printed, else omit. tax: the tax line, else omit. total: the final total charged.
+- Never guess a price. If any digit of a line's price is blurry, cut off, or covered, still list the line, with price "" and readable false. Otherwise readable is true.
 - unreadable_lines: how many item lines you could not read.
 - Never include payment details: no card type, card numbers, auth codes, cash or change lines.
 If the image is not a receipt, return {"items": [], "total": "0"}.`;
@@ -187,6 +184,12 @@ export async function readReceipt(
 export interface ReceiptLine {
   name: string;
   cents: number;
+  /** One blurry line whose price was worked out from the total (total - tax + discounts - other lines). */
+  inferred?: boolean;
+  /** Several blurry lines lumped into one shared "other groceries" line: how many. */
+  unclear?: number;
+  /** The user told us what a blurry line was. */
+  named?: boolean;
   /** Who this line is for: one person (theirs), a few (shared by them), or null (the whole split). */
   owners: number[] | null;
 }
@@ -206,6 +209,9 @@ export interface CheckedReceipt {
   dropped: number;
 }
 
+/** More blurry lines than this and the total can't sensibly fill the gap: ask for a clearer photo. */
+export const MAX_FILLED_LINES = 3;
+
 const NOT_AN_ITEM = /\b(visa|master\s?card|amex|american express|discover|debit|credit|card|acct|account|auth|approval|change|cash|tender|balance|sub\s?total|total|tax|payment|chip|contactless)\b/i;
 
 /** Remove anything that could be a card or account number (and PLU/UPC codes). */
@@ -220,7 +226,17 @@ export function checkReceipt(raw: RawReceipt): CheckedReceipt {
   let discountCents = raw.discounts ? (parseCents(raw.discounts) ?? 0) : 0;
   const printedDiscounts = discountCents > 0;
   let dropped = 0;
+  /** Blurry lines, with where they sat in the list so a filled-in line keeps its place. */
+  const blurry: { name: string; at: number }[] = [];
   for (const line of raw.items) {
+    if (NOT_AN_ITEM.test(line.name)) {
+      dropped++;
+      continue;
+    }
+    if (line.readable === false || !line.price.trim()) {
+      blurry.push({ name: cleanName(line.name), at: items.length });
+      continue;
+    }
     const cents = parseCents(line.price);
     if (cents === null || cents === 0 || NOT_AN_ITEM.test(line.name)) {
       dropped++;
@@ -238,9 +254,21 @@ export function checkReceipt(raw: RawReceipt): CheckedReceipt {
     }
     items.push({ name, cents, owners: null });
   }
-  const itemsCents = items.reduce((s, i) => s + i.cents, 0);
   const taxCents = raw.tax ? (parseCents(raw.tax) ?? 0) : 0;
   const totalCents = parseCents(raw.total) ?? 0;
+  let unreadable = Math.max(raw.unreadable_lines ?? 0, blurry.length);
+
+  // Blurry lines: the total is usually the clearest thing on a receipt, so let it fill the gap.
+  const missing = totalCents - taxCents + discountCents - items.reduce((s, i) => s + i.cents, 0);
+  if (totalCents > 0 && missing > 0 && unreadable >= 1 && unreadable <= MAX_FILLED_LINES) {
+    if (unreadable === 1) {
+      items.splice(blurry[0]?.at ?? items.length, 0, { name: blurry[0]?.name || "unreadable item", cents: missing, owners: null, inferred: true });
+    }
+    else items.push({ name: "other groceries", cents: missing, owners: null, unclear: unreadable });
+    unreadable = 0;
+  }
+
+  const itemsCents = items.reduce((s, i) => s + i.cents, 0);
   const diffCents = itemsCents - discountCents + taxCents - totalCents;
   return {
     store: raw.store ? cleanName(raw.store) || null : null,
@@ -251,7 +279,7 @@ export function checkReceipt(raw: RawReceipt): CheckedReceipt {
     totalCents,
     diffCents,
     balanced: totalCents > 0 && Math.abs(diffCents) <= 1,
-    unreadable: raw.unreadable_lines ?? 0,
+    unreadable,
     dropped,
   };
 }
