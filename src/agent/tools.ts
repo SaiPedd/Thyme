@@ -554,7 +554,17 @@ function statusTool(name: "use_item" | "log_toss", status: "used" | "tossed", de
     run(input, ctx) {
       const phrase = String(input.item ?? "");
       const item = findItem(ctx.db, ctx.household.id, ctx.member.id, phrase);
-      if (!item) return { done: false, note: `nothing called "${input.item}" in the fridge list` };
+      if (!item) {
+        // It may be a roommate's own food: hidden from everyone else. Say so, without naming whose.
+        const others = ctx.db
+          .query<Item, [number, number]>("SELECT * FROM items WHERE household_id = ? AND status = 'fresh' AND owner_member_id IS NOT NULL AND owner_member_id != ?")
+          .all(ctx.household.id, ctx.member.id);
+        if (matchItem(others, phrase)) {
+          const said = `That's someone else's food, so only they can mark it ${status === "used" ? "used" : "tossed"}.`;
+          return { done: false, someone_elses: true, message: said, note: `Reply with exactly this sentence and nothing else: ${said}` };
+        }
+        return { done: false, note: `nothing called "${input.item}" in the fridge list` };
+      }
       // A personal item named in the group: do it, but confirm by DM and never name it in the group.
       const privately = ctx.isGroup && item.owner_member_id !== null;
       // "tossed the spinach" ... "no, I threw it out": don't toss a second, different spinach.

@@ -229,6 +229,7 @@ export function describeToolResult(name: string, r: Record<string, any>): string
       if (r.personal_logged_privately) return "Done, I DM'd you the details.";
       if (r.already_done) return "That's already done.";
       if (r.already) return `The ${r.already} is already marked as ${name === "use_item" ? "used" : "tossed"}.`;
+      if (r.someone_elses) return `That's someone else's food, so only they can mark it ${name === "use_item" ? "used" : "tossed"}.`;
       if (!r.done) return `I don't see that in the fridge list.`;
       return describeStatus(r as Parameters<typeof describeStatus>[0]);
     case "get_waste_summary": {

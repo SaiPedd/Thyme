@@ -126,3 +126,19 @@ describe("rule-based path (and fact questions answered by code)", () => {
     expect(describeToolResult("donated_item", { done: false })).toContain("couldn't find");
   });
 });
+
+describe("someone else's food", () => {
+  test("tossing a roommate's own food says it's theirs, without naming whose", async () => {
+    const db = await kitchen();
+    const { addItem } = await import("../src/domain/inventory");
+    addItem(db, { householdId: 1, name: "ground beef 85/15", buyerId: 1, ownerId: 3, state: "raw", lookupName: "ground beef" });
+    const alex = ctxFor(db, 0);
+    const r = runTool("log_toss", { item: "ground beef" }, alex);
+    expect(r).toMatchObject({ done: false, someone_elses: true });
+    const said = describeToolResult("log_toss", r)!;
+    expect(said).toBe("That's someone else's food, so only they can mark it tossed.");
+    expect(said).not.toContain("Jordan");
+    expect(status(db, "ground beef 85/15")).toBe("fresh");
+    expect(runTool("log_toss", { item: "ground beef" }, ctxFor(db, 2))).toMatchObject({ done: true }); // Jordan can
+  });
+});
