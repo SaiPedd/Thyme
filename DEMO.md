@@ -62,7 +62,7 @@ Say: "Expiry dates come from the USDA FoodKeeper table, using the conservative e
 | `Thyme I tossed the bananas, they went bad` | Logged in the waste ledger (tracking only: it doesn't change anyone's balance). |
 | `Thyme how much food have we wasted?` | Items wasted and rescued this week. Dollars only count food with a known price (the starter bananas have none). |
 
-Say: "Every toss and rescue goes in the waste ledger, so the house sees what it's throwing away, in dollars and CO2."
+Say: "Every toss and rescue goes in the waste ledger, so the house sees what it's throwing away and what it saved."
 
 | Type | Expect |
 |---|---|

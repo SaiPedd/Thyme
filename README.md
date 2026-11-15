@@ -13,12 +13,12 @@ Full build plan: [PLAN.md](PLAN.md).
 |---|---|---|
 | 0 | Claw Messenger spike, config, database schema, USDA FoodKeeper import | Done |
 | 1 | Bun WebSocket integration, Gemini Interactions loop, privacy and outbox | Done |
-| 2 | Expense splitting: split summary, recording expenses, undo, balances | Done |
+| 2 | Expense splitting: split summary, recording expenses, undo, balances, settling up, payment info | Done |
 | 3 | Inventory and expiry tracking, reminders, claims on expiring food | Done |
 | 4 | Kitchen companion: recipes from what's in the fridge (built-in + TheMealDB), saved preferences | Done |
-| 5 | Waste ledger: tosses and rescues, tracked (never charged to balances) | Done |
-| 6 | Receipt photos (stretch), settling up | Done |
-| 7 | Demo polish, eval script | Planned |
+| 5 | Waste ledger: tosses and rescues, tracked (never charged to balances); donating food to local pantries | Done |
+| 6 | Receipt photos (stretch): reading, fixing misread lines, coupons, undo | Done |
+| 7 | Demo polish: demo script and recovery plan ([DEMO.md](DEMO.md)) | Done (eval script cut for time) |
 
 ## What works today
 
@@ -47,14 +47,18 @@ Thyme:  Cooked rice lasts 4-6 days in the fridge according to the USDA FoodKeepe
 
 - **Expense splitting:** equal, per item ("the chicken is just mine"), between some roommates ("the milk
   is me and Sam"), or fixed amounts ("Sam owes 8"). Also undo, duplicate detection, and balances
-  that net out across everything.
+  that net out across everything. "Me" always means whoever sent the message, and Thyme won't put a roommate on
+  an expense unless the sender named them.
 - **Receipt photos:** send a photo of a grocery receipt. Thyme reads the items, tax, and total, checks that
   they add up, and shows the list. Reply "Sam paid" if someone else bought it, "2 is mine", "3 and 4 are
   Jordan's", or "5 is me and Sam's" for items that aren't for everyone, "split with Sam only" or "split between
   me and Jordan" if not the whole house is in on it, then "yes". Fix a misread line before saving: "3 was 6.49"
   (price), "3 was yogurt" (a name it couldn't read), "remove 3", or "total is $X". A blurry price is worked out
-  from the total, and a coupon comes off the item it's for. It splits the bill (each kept item carries its share of tax)
-  and adds the food to the fridge list with the real prices. Nothing is saved before "yes", and the photo is never stored.
+  from the total, and a coupon comes off the item it's for. Only the person who sent the receipt can confirm it, and
+  roommates who haven't said their name yet are still in the split. It splits the bill (each kept item carries its share of tax)
+  and adds the food to the fridge list with the real prices and USDA expiry dates (receipt names like
+  "organic baby spinach 5oz" are cleaned up first, so they match the right food). Nothing is saved before "yes",
+  and the photo is never stored.
   Whoever sent the receipt can "undo" it, which also takes its food back off the fridge list.
 - **Settling up:** "I paid Alex back $12", "Sam venmo'd me", or "Alex and I are square" records a payback, so
   balances can go back to $0. With no amount, code settles exactly what's owed; paying more than is owed is
@@ -133,6 +137,7 @@ cp .env.example .env    # fill in the values; never commit .env
 | `HOUSEHOLD_TZ` | Time zone for the 9 AM reminders and dates, e.g. `America/New_York` |
 | `LLM` | `off` to use only the rule-based fallback |
 | `CLAW_TEST_NUMBERS` | Phones for the spike and phone registration, in `+1...` format |
+| `SEED_MEMBERS` | Optional: `Name:+1...,Name:+1...` so `bun run seed` adds roommates with names already set |
 
 Secrets stay in `.env`. The startup check reports only whether each key is set, never its value.
 Logs never contain message text or full phone numbers (only the last 4 digits).
@@ -145,7 +150,7 @@ bun run register-phones  # register CLAW_TEST_NUMBERS with Claw
 bun run seed             # reset: one household, empty kitchen; roommates join from the group chat
 bun run seed --demo      # fictional roommates (Alex, Sam, Jordan) and a starter fridge for the terminal chat
 bun run mealdb-warm      # pre-cache TheMealDB recipes for what's in the kitchen (run before a demo)
-bun run chat             # talk to Thyme in the terminal (/as <name>, /group, /dm, /photo <path>); sends no real messages
+bun run chat             # talk to Thyme in the terminal (/as <name>, /as Sam, <message>, /group, /dm, /photo <path>); sends no real messages
 bun start                # run Thyme on Claw Messenger (real iMessage)
 bun test                 # all tests
 bun run typecheck
@@ -195,3 +200,6 @@ data/foodkeeper.json     USDA FoodKeeper data
 - Undoing an expense doesn't clear item prices that its line items set.
 - Group chats need both roommates' numbers registered with Claw first (`bun run register-phones`).
 - Thyme is also a herb, so "we're out of thyme" will get a reply.
+- A saved receipt can't be reopened to edit; "undo" it and send the photo again.
+- The donation list is two hand-checked places near Princeton; confirm hours and accepted food before relying on it.
+- Some foods have no good USDA FoodKeeper match (e.g. bread), so a receipt's bread isn't added to the fridge list (Thyme says so).
