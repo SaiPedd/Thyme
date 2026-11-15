@@ -98,7 +98,7 @@ export function withRecipeCredit(reply: string, toolResults: { name: string; res
 }
 
 /** Intents answered by code, never by the model's wording. */
-const FACT_QUESTIONS = new Set(["inventory", "balances", "waste"]);
+const FACT_QUESTIONS = new Set(["inventory", "balances", "waste", "donate", "donated"]);
 
 /** "I sent your balance to your DMs", "I DM'd you": only true if a private message was actually queued. */
 export function claimsPrivateSend(reply: string): boolean {

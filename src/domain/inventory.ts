@@ -206,12 +206,13 @@ export function findItem(db: Database, householdId: number, memberId: number, ph
  * tossed = wasted; used while at risk (within 48h) and not past its date = rescued.
  * `by` is the member who did it.
  */
-export function setItemStatus(db: Database, itemId: number, status: "used" | "tossed", by: number | null = null): void {
+/** `rescued`: count it as a rescue even if it wasn't about to expire (it was given away, not tossed). */
+export function setItemStatus(db: Database, itemId: number, status: "used" | "tossed", by: number | null = null, opts: { rescued?: boolean } = {}): void {
   const at = now().toISOString();
   db.transaction(() => {
     const item = db.query<Item, [number]>("SELECT * FROM items WHERE id = ? AND status = 'fresh'").get(itemId);
     if (item && status === "tossed") recordLedger(db, item, "wasted", by);
-    else if (item && isAtRisk(item) && !isPast(item)) recordLedger(db, item, "rescued", by);
+    else if (item && (opts.rescued || (isAtRisk(item) && !isPast(item)))) recordLedger(db, item, "rescued", by);
     db.run("UPDATE items SET status = ?, status_at = ? WHERE id = ?", [status, at, itemId]);
     db.run("UPDATE nudges SET responded_at = ? WHERE item_id = ? AND responded_at IS NULL", [at, itemId]);
   })();

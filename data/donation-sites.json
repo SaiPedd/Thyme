@@ -1,0 +1,32 @@
+{
+  "note": "Hand-checked list. Thyme only ever shows what is written here (it never looks places up or makes them up). Confirm hours and what each place accepts before relying on it, and update 'checked'.",
+  "sites": [
+    {
+      "id": "arm-in-arm-princeton",
+      "name": "Arm In Arm (Princeton pantry)",
+      "address": "Nassau Presbyterian Church (basement), 61 Nassau St, Princeton, NJ 08542",
+      "contact": "609-396-9355, info@arminarm.org",
+      "accepts": ["shelf_stable"],
+      "how": "Sealed, non-perishable food only (cans about 12-16 oz, no glass), within its date. Call first to confirm drop-off times.",
+      "sources": [
+        "https://www.dailyprincetonian.com/article/2025/03/princeton-features-profiles-arm-in-arm-food-pantry",
+        "https://nassauchurch.org/tag/vff",
+        "https://www.foodhelpline.org/locations/princeton"
+      ],
+      "checked": "2026-11-15 (web listings, not yet confirmed by phone)"
+    },
+    {
+      "id": "princeton-mobile-food-pantry",
+      "name": "Princeton Mobile Food Pantry",
+      "address": "No public drop-off site: deliveries are packed by volunteers at Princeton Shopping Center",
+      "contact": "info@pmfpantry.org",
+      "accepts": ["fresh_by_arrangement"],
+      "how": "Delivers fresh food to Princeton families. Email first; don't drop off perishables without arranging it.",
+      "sources": [
+        "https://directory.plentiful.org/new-jersey/princeton/princeton-mobile-food-pantry-0c189fe5",
+        "https://www.princetonk12.org/district/district-news/news/district-story/~board/district-news/post/pps-volunteers-engage-to-support-princeton-mobile-food-pantry"
+      ],
+      "checked": "2026-11-15 (web listings, not yet confirmed by email)"
+    }
+  ]
+}

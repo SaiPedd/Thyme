@@ -64,6 +64,14 @@ Say: "Expiry dates come from the USDA FoodKeeper table, using the conservative e
 
 Say: "Every toss and rescue goes in the waste ledger, so the house sees what it's throwing away, in dollars and CO2."
 
+| Type | Expect |
+|---|---|
+| `Thyme where can we donate the rice?` | Arm In Arm at Nassau Presbyterian Church, sealed and unopened only. |
+| `Thyme can we donate the spinach?` | Fresh food: offer it to the house first; the mobile pantry only by arrangement. |
+| `Thyme I donated the rice` | Off the list, counted as a rescue. |
+
+Say: "Instead of tossing it, Thyme points you to a local pantry, and code checks it's safe to give: sealed, in date, and somewhere that takes that kind of food."
+
 ### Close
 "One group chat. It splits the bill, warns you before food goes bad, cooks with what's left, and keeps score on waste."
 

@@ -22,6 +22,7 @@ import {
   savePaymentMethod,
 } from "../domain/payments";
 import { MEALDB_CREDIT, type MealDbClient } from "../domain/mealdb";
+import { describeDonation, donationAdvice } from "../domain/donate";
 import { pickMealDbRecipes, pickRecipes, uncheckedDiets, validateRecipe, type MealDbPick, type RecipeCheck } from "../domain/recipes";
 import {
   addItem,
@@ -1017,6 +1018,56 @@ const checkItemTool: ToolDef = {
   },
 };
 
+const findDonationTool: ToolDef = {
+  name: "find_donation_spot",
+  description:
+    "Where to give food away instead of tossing it: local food pantries from a checked list, and whether this food can go. " +
+    "Use for \"where can I donate this?\", \"can we give the rice away?\", \"food pantry near us\". Repeat its message as written; " +
+    "never name a place, address, or hours yourself.",
+  input_schema: {
+    type: "object",
+    properties: { item: { type: "string", description: "The food, if they named one, e.g. \"the rice\"" } },
+    additionalProperties: false,
+  },
+  run(input, ctx) {
+    const phrase = typeof input.item === "string" ? input.item.trim() : "";
+    const item = phrase ? findItem(ctx.db, ctx.household.id, ctx.member.id, phrase) : null;
+    if (phrase && !item) return { found: false, note: `nothing called "${phrase}" in the kitchen list`, message: describeDonation(donationAdvice(null)) };
+    // A personal item named in the group: answer by DM, never name it in the group.
+    if (item && ctx.isGroup && item.owner_member_id !== null) {
+      ctx.drafts.push({ audience: { kind: "member", memberId: ctx.member.id }, sensitivity: "personal", subjectMemberId: ctx.member.id, text: describeDonation(donationAdvice(item)) });
+      return { sent_privately: true, note: "It's one of their own items: the answer went by DM. Don't name it in the group." };
+    }
+    return { message: describeDonation(donationAdvice(item)) };
+  },
+};
+
+const donatedTool: ToolDef = {
+  name: "donated_item",
+  description:
+    "Log that food was given away (donated to a pantry, given to a neighbor): it leaves the kitchen list and counts as a rescue " +
+    "in the waste ledger. Use for \"I donated the rice\", \"we gave the bread away\". Refuses food past its USDA date.",
+  input_schema: {
+    type: "object",
+    properties: { item: { type: "string", description: "The food as the user said it, e.g. \"the rice\"" } },
+    required: ["item"],
+    additionalProperties: false,
+  },
+  run(input, ctx) {
+    const item = findItem(ctx.db, ctx.household.id, ctx.member.id, String(input.item ?? ""));
+    if (!item) return { done: false, note: `nothing called "${input.item}" in the kitchen list` };
+    const advice = donationAdvice(item);
+    if (!advice.ok) return { done: false, message: describeDonation(advice) };
+    setItemStatus(ctx.db, item.id, "used", ctx.member.id, { rescued: true });
+    const text = `Logged: the ${item.name} was given away instead of tossed. That counts as a rescue.`;
+    if (ctx.isGroup && item.owner_member_id !== null) {
+      ctx.drafts.push({ audience: { kind: "member", memberId: ctx.member.id }, sensitivity: "personal", subjectMemberId: ctx.member.id, text });
+      return { done: true, personal_logged_privately: true, note: "One of their own items: confirmed by DM. Don't name it in the group." };
+    }
+    return { done: true, message: text };
+  },
+};
+
 export const TOOLS: ToolDef[] = [
   recordExpenseTool,
   undoTool,
@@ -1037,6 +1088,8 @@ export const TOOLS: ToolDef[] = [
   savePaymentTool,
   getPaymentTool,
   checkItemTool,
+  findDonationTool,
+  donatedTool,
   summaryTool,
 ];
 

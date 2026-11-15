@@ -68,6 +68,11 @@ Thyme:  Cooked rice lasts 4-6 days in the fridge according to the USDA FoodKeepe
   9 AM about shared food expiring within 48 hours (personal food goes to the owner's DM), and "mine" claims it.
 - **Kitchen companion:** "what can I make?" suggests a recipe that only uses what's in the fridge, favoring food
   about to expire and honoring saved diets, dislikes, and allergies.
+- **Give food away instead of tossing it:** "where can I donate the rice?" or "food pantry near us?" answers from a
+  hand-checked list of Princeton pantries ([data/donation-sites.json](data/donation-sites.json)); the model never names a
+  place itself. Code applies the food-safety rules: shelf-stable food only if sealed and unopened, fresh food is offered to
+  the house first (pantries here don't take fresh drop-offs), and nothing past its USDA date is ever suggested.
+  "I donated the rice" takes it off the list and counts as a rescue in the waste ledger.
 - **How to pay back:** "pay me through Zelle at dharaniDevadiga" or "my Venmo is @dharani" saves how you want
   to be paid (Zelle, Venmo, Cash App, PayPal, Apple Cash; several allowed). "What do I owe?" then shows it next
   to each amount: "you owe Dharani $13.20 (pay with Zelle: dharaniDevadiga)". Handles are saved exactly as typed,

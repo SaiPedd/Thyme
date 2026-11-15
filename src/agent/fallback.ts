@@ -21,6 +21,8 @@ export type Intent =
   | { kind: "toss"; item: string }
   | { kind: "inventory" }
   | { kind: "waste" }
+  | { kind: "donate"; item?: string }
+  | { kind: "donated"; item: string }
   | { kind: "claim"; item?: string }
   | { kind: "recipe"; another?: boolean }
   | { kind: "cooked" }
@@ -93,6 +95,16 @@ export function parseIntent(raw: string, botName = "", memberNames?: string[]): 
   const t = text.toLowerCase();
 
   if (/^(undo|scratch that|nvm undo)\b/.test(t)) return { kind: "undo" };
+
+  // Giving food away: "where can I donate the rice?", "food pantry near us", "I donated the rice".
+  let d = t.replace(/[?!.]+$/, "").match(/^(?:i |we )?(?:just )?(?:donated (?:the |our |my |some )?(.+?)|gave away (?:the |our |my |some )?(.+?)|gave (?:the |our |my |some )(.+?) away)(?:\s+to\s+.+)?$/);
+  if (d) return { kind: "donated", item: cleanItem(d[1] ?? d[2] ?? d[3]!) };
+  d = t.replace(/[?!.]+$/, "").match(/\b(?:where|how) (?:can|could|do|should) (?:i|we) (?:donate|give away|give)(?: (?:the |our |my |this |that |some )?(.+?))?(?: away)?$|\bcan (?:i|we) (?:donate|give away) (?:the |our |my |this |that |some )?(.+?)$/);
+  if (d) {
+    const item = d[1] ?? d[2];
+    return item && !/^(food|it|this|that|stuff|things|leftovers)$/.test(item) ? { kind: "donate", item: cleanItem(item) } : { kind: "donate" };
+  }
+  if (/\bfood (bank|pantry|pantries|donations?)\b|\bdonat(e|ion) (spot|place|site|center)s?\b|\bwhere (can|do) (i|we) donate\b/.test(t)) return { kind: "donate" };
   if (/\b(what do i owe|who owes me|my balance|balances?\??$)/.test(t)) return { kind: "balances" };
   // Before expenses: "I paid Alex back $12" mentions money and "paid" but isn't a new expense.
   const payment = parsePayment(text, memberNames);
@@ -323,6 +335,13 @@ export function describeToolResult(name: string, r: Record<string, any>): string
       return r.payment_methods ? `Roommates who owe you see: ${r.payment_methods}.` : `You haven't saved any payment info. Try "pay me through Zelle at <your handle>".`;
     case "forget_me":
       return `Done. I deleted your saved preferences, payment info, and our chat history. Expenses and balances stay so everyone's totals are right.`;
+    case "find_donation_spot":
+      if (r.sent_privately) return "I sent you that privately.";
+      return [r.found === false ? `I couldn't find that in the kitchen list.` : "", String(r.message ?? "")].filter(Boolean).join("\n");
+    case "donated_item":
+      if (r.personal_logged_privately) return "Got it. I sent you the details privately.";
+      if (r.message) return String(r.message);
+      return `I couldn't find that in the kitchen list.`;
     case "check_item":
       if (r.item) return `The ${r.item}: ${r.status}. ${r.advice}`;
       return describeToolResult("shelf_life_lookup", r);
@@ -369,6 +388,10 @@ export async function runFallback(text: string, ctx: ToolContext, botName = ""):
       return describeToolResult("get_inventory", await runToolAsync("get_inventory", {}, ctx));
     case "waste":
       return describeToolResult("get_waste_summary", await runToolAsync("get_waste_summary", {}, ctx));
+    case "donate":
+      return describeToolResult("find_donation_spot", await runToolAsync("find_donation_spot", intent.item ? { item: intent.item } : {}, ctx));
+    case "donated":
+      return describeToolResult("donated_item", await runToolAsync("donated_item", { item: intent.item }, ctx));
     case "claim":
       return describeToolResult("claim_item", await runToolAsync("claim_item", intent.item ? { item: intent.item } : {}, ctx));
     case "recipe":
