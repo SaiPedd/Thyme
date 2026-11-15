@@ -1,7 +1,8 @@
 // Rule-based fallback (LLM=off, no key, timeout, or failure). Handles the core patterns:
 // "got X, Y", "used the X", "tossed X", "groceries $N split K ways", "undo", "what do I owe",
 // "what's in the fridge", claims ("mine", "I'll take the X"), recipes, "I cooked it" + "yes",
-// food preferences, "is the X still good?", and "forget me".
+// food preferences, "is the X still good?", "forget me", and paybacks ("I paid Alex back $12", "Sam paid me back",
+// "Alex and I are square").
 // Uses the same tools as the agent, so facts come from code either way.
 
 import { runToolAsync, type ToolContext } from "./tools";
@@ -10,6 +11,7 @@ import { agree, isPlural } from "../domain/inventory";
 export type Intent =
   | { kind: "expense"; total: string; ways?: number; mineItems: { description: string; amount: string }[] }
   | { kind: "undo" }
+  | { kind: "payment"; other: string; direction: "i_paid_them" | "they_paid_me" | "square"; amount?: string }
   | { kind: "balances" }
   | { kind: "add"; items: { name: string; price?: string }[] }
   | { kind: "use"; item: string }
@@ -46,13 +48,52 @@ function splitList(s: string): { name: string; price?: string }[] {
 
 const cleanItem = (s: string) => s.replace(/[.!?]+$/, "").trim();
 
-export function parseIntent(raw: string, botName = ""): Intent | null {
+/** Words that can follow "paid"/"sent" but aren't a roommate ("paid for groceries", "sent the link"). */
+const NOT_PERSON = new Set(["for", "the", "a", "an", "it", "off", "up", "my", "our", "your", "rent", "bills", "bill", "back", "me", "him", "her", "them", "everyone", "groceries", "cash"]);
+const AMOUNT = /\$?\s?(\d[\d,]*(?:\.\d{1,2})?)\b/;
+const PAY_VERB = "(?:paid|payed|venmo'?d|venmoed|zelled|zelle'?d|cash ?app'?d|sent|gave)";
+
+/**
+ * "I paid Alex back $12" / "venmo'd Sam 20" / "Sam paid me back" / "Alex and I are square" / "settle up with Sam".
+ * With memberNames, only real roommates count (so "I paid rent $500" stays an expense).
+ */
+export function parsePayment(text: string, memberNames?: string[]): Extract<Intent, { kind: "payment" }> | null {
+  const t = text.toLowerCase().replace(/[!.]+$/, "").replace(/’/g, "'").trim();
+  const isPerson = (n: string) => !NOT_PERSON.has(n) && (!memberNames || memberNames.some((m) => m.toLowerCase().split(/\s+/)[0] === n));
+  const amountIn = (rest: string) => rest.match(AMOUNT)?.[1];
+
+  let m = t.match(new RegExp(`^(?:i\\s+)?(?:just\\s+)?${PAY_VERB}\\s+([a-z]+)\\b(.*)$`));
+  if (m && isPerson(m[1]!)) {
+    const rest = m[2]!;
+    const amount = amountIn(rest);
+    // "sent Sam the link" isn't a payment: it needs "back", an amount, or nothing after the name.
+    if (amount || /\bback\b/.test(rest) || !rest.trim()) return { kind: "payment", other: m[1]!, direction: "i_paid_them", amount };
+  }
+  m = t.match(new RegExp(`^([a-z]+)\\s+(?:just\\s+)?${PAY_VERB}\\s+me\\b(.*)$`));
+  if (m && isPerson(m[1]!) && !["i", "we", "you"].includes(m[1]!)) {
+    return { kind: "payment", other: m[1]!, direction: "they_paid_me", amount: amountIn(m[2]!) };
+  }
+  m =
+    t.match(/^(?:me and ([a-z]+)|([a-z]+) and (?:i|me)) (?:are|r) (?:all |now )?(?:square|even|settled|settled up|quits)\b/) ??
+    t.match(/\b(?:i'?m|i am|we'?re|we are) (?:all |now )?(?:square|even|settled|settled up|quits) with ([a-z]+)\b/) ??
+    t.match(/^settle(?:d)? up with ([a-z]+)\b/);
+  if (m) {
+    const who = (m[1] ?? m[2])!;
+    if (isPerson(who)) return { kind: "payment", other: who, direction: "square" };
+  }
+  return null;
+}
+
+export function parseIntent(raw: string, botName = "", memberNames?: string[]): Intent | null {
   let text = raw.trim();
   if (botName) text = text.replace(new RegExp(`^@?${botName.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}[,:]?\\s*`, "i"), "");
   const t = text.toLowerCase();
 
   if (/^(undo|scratch that|nvm undo)\b/.test(t)) return { kind: "undo" };
   if (/\b(what do i owe|who owes me|my balance|balances?\??$)/.test(t)) return { kind: "balances" };
+  // Before expenses: "I paid Alex back $12" mentions money and "paid" but isn't a new expense.
+  const payment = parsePayment(text, memberNames);
+  if (payment) return payment;
 
   const money = text.match(/\$\s?\d[\d,]*(?:\.\d{1,2})?/);
   if (money && /\b(groceries|grocery|spent|paid|bill|split|costco|trader joe'?s|target)\b/i.test(text)) {
@@ -127,9 +168,14 @@ export function describeToolResult(name: string, r: Record<string, any>): string
   switch (name) {
     case "undo_last":
       if (!r.undone) return "There's nothing of yours to undo.";
+      if (r.kind === "payment") return r.sent_privately ? "Undone. I DM'd you both." : `Undone: ${r.summary}.`;
       if (r.kind === "toss") return `Undone: the ${r.item} is back in the fridge list.`;
       const removed = (r.removed_from_fridge as string[] | undefined) ?? [];
       return `Undone: the ${r.total} expense is removed.${removed.length ? ` Also took ${removed.join(", ")} off the fridge list.` : ""}`;
+    case "record_payment":
+      if (r.sent_privately) return r.recorded ? "Got it, recorded. I DM'd you both the details." : "I sent you the details privately.";
+      if (r.summary) return `${r.summary}${r.recorded ? ` ${r.how_to_fix ?? ""}`.trimEnd() : ""}`;
+      return `I couldn't record that: ${r.error ?? "unknown problem"}.`;
     case "get_balances":
       if (r.sent_privately) return "I sent your balance to you privately.";
       return [`Your balance: ${r.net}.`, ...((r.breakdown as string[]) ?? [])].join("\n");
@@ -270,7 +316,7 @@ const list = (xs: string[]) => (xs.length <= 1 ? (xs[0] ?? "") : `${xs.slice(0, 
 
 /** Run the intent with the shared tools and word the reply with fixed templates. */
 export async function runFallback(text: string, ctx: ToolContext, botName = ""): Promise<string | null> {
-  const intent = parseIntent(text, botName);
+  const intent = parseIntent(text, botName, ctx.members.map((m) => m.name));
   if (!intent) return null;
 
   switch (intent.kind) {
@@ -278,6 +324,11 @@ export async function runFallback(text: string, ctx: ToolContext, botName = ""):
       return describeToolResult("undo_last", await runToolAsync("undo_last", {}, ctx));
     case "balances":
       return describeToolResult("get_balances", await runToolAsync("get_balances", {}, ctx));
+    case "payment":
+      return describeToolResult(
+        "record_payment",
+        await runToolAsync("record_payment", { other: intent.other, direction: intent.direction, ...(intent.amount ? { amount: intent.amount } : {}) }, ctx),
+      );
     case "expense": {
       if (intent.ways && intent.ways !== ctx.members.length) {
         return `Who's splitting it? The household has ${ctx.members.length} people (${ctx.members.map((m) => m.name).join(", ")}).`;

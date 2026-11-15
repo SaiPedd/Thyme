@@ -4,7 +4,7 @@ import { migrate, openDb } from "../src/db";
 
 const TABLES = [
   "balance_entries", "claims", "expense_shares", "expenses", "households", "items", "ledger", "mealdb_by_ingredient",
-  "mealdb_meals", "members", "nudges", "prefs", "seen_messages", "sends", "shelf_life", "shelf_life_fts", "state", "turns",
+  "mealdb_meals", "members", "nudges", "payments", "prefs", "seen_messages", "sends", "shelf_life", "shelf_life_fts", "state", "turns",
   "usage_counters",
 ];
 

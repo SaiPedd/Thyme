@@ -4,7 +4,8 @@
 
 import type { Database } from "bun:sqlite";
 import { formatCents, parseCents } from "../domain/money";
-import { balancesFor, DuplicateExpenseError, recordExpense, undoLastExpense } from "../domain/expenses";
+import { balancesFor, DuplicateExpenseError, LOGGED_BY, recordExpense, undoLastExpense } from "../domain/expenses";
+import { lastPayment, owedBetween, PaymentError, recordPayment, undoPayment } from "../domain/payments";
 import { searchShelfLife, type ShelfLifeRow, type Storage } from "../domain/foodkeeper";
 import { claimItem, claimTime, claimWinner } from "../domain/claims";
 import { wasteSummary, type LedgerTotals } from "../domain/ledger";
@@ -252,11 +253,36 @@ const recordExpenseTool: ToolDef = {
   },
 };
 
+/** Tell both people about a payment by DM (balances between two people are private). */
+function dmBoth(ctx: ToolContext, ids: number[], text: string) {
+  for (const id of new Set(ids)) {
+    // In a DM, the sender already gets the reply itself.
+    if (!ctx.isGroup && id === ctx.member.id) continue;
+    ctx.drafts.push({ audience: { kind: "member", memberId: id }, sensitivity: "personal", subjectMemberId: id, text });
+  }
+}
+
 const undoTool: ToolDef = {
   name: "undo_last",
-  description: "Undo the most recent expense the sender logged (including a receipt someone else paid for). Use when they say undo, scratch that, or it was wrong.",
+  description:
+    "Undo the most recent expense or payback the sender logged (including a receipt someone else paid for). Use when they say undo, scratch that, or it was wrong.",
   input_schema: { type: "object", properties: {}, additionalProperties: false },
   run(_input, ctx) {
+    // Whichever they logged last: an expense or a payment.
+    const pay = lastPayment(ctx.db, ctx.household.id, ctx.member.id);
+    const exp = ctx.db
+      .query<{ created_at: string }, [number, number]>(
+        `SELECT created_at FROM expenses WHERE household_id = ? AND ${LOGGED_BY} = ? AND undone_at IS NULL ORDER BY id DESC LIMIT 1`,
+      )
+      .get(ctx.household.id, ctx.member.id);
+    if (pay && (!exp || pay.created_at >= exp.created_at)) {
+      undoPayment(ctx.db, pay.id);
+      const summary = `the ${formatCents(pay.amount_cents)} payment from ${nameOf(ctx, pay.from_member_id)} to ${nameOf(ctx, pay.to_member_id)} is removed`;
+      dmBoth(ctx, [pay.from_member_id, pay.to_member_id], `Undone: ${summary}.`);
+      return ctx.isGroup
+        ? { undone: true, kind: "payment", sent_privately: true, note: "Payments are private. Say it's undone and you DM'd them; no amounts." }
+        : { undone: true, kind: "payment", summary };
+    }
     const undone = undoLastExpense(ctx.db, ctx.household.id, ctx.member.id);
     if (!undone) return { undone: false, note: "nothing to undo" };
     return {
@@ -264,6 +290,84 @@ const undoTool: ToolDef = {
       total: formatCents(undone.totalCents),
       ...(undone.itemsRemoved.length ? { removed_from_fridge: undone.itemsRemoved } : {}),
     };
+  },
+};
+
+/** In the group, a balance fact goes to the sender's DM instead, and the model only learns it was sent. */
+function privateInGroup(ctx: ToolContext, r: { summary: string } & Record<string, unknown>): ToolResult {
+  if (!ctx.isGroup) return r;
+  dmBoth(ctx, [ctx.member.id], r.summary);
+  const { summary: _hidden, ...rest } = r;
+  return { ...rest, sent_privately: true, note: "This is about balances, which are private. Say you DM'd them; no amounts." };
+}
+
+const recordPaymentTool: ToolDef = {
+  name: "record_payment",
+  description:
+    "Record that someone paid a roommate back, to settle a balance: \"I paid Alex back $12\", \"Sam venmo'd me\", \"Alex and I are square\". " +
+    "This is NOT an expense: never use record_expense for paying someone back. Leave out amount if they didn't say one; code then settles exactly what is owed. " +
+    "Code refuses to record more than is owed.",
+  input_schema: {
+    type: "object",
+    properties: {
+      other: { type: "string", description: "The roommate on the other side, by first name" },
+      direction: {
+        type: "string",
+        enum: ["i_paid_them", "they_paid_me", "square"],
+        description: "i_paid_them: the sender paid. they_paid_me: the other person paid the sender. square: they say they're even; code works out who paid.",
+      },
+      amount: { type: "string", description: "Only if they said one, as written, e.g. \"$12\"" },
+    },
+    required: ["other", "direction"],
+    additionalProperties: false,
+  },
+  run(input, ctx) {
+    const otherId = resolveMember(ctx, String(input.other ?? ""));
+    if (otherId === null) return { recorded: false, error: `unknown person "${input.other}". Roommates: ${ctx.members.map((m) => m.name).join(", ")}` };
+    if (otherId === ctx.member.id) return { recorded: false, error: "they named themselves. Ask who they paid or who paid them." };
+    const me = ctx.member.id;
+    const other = nameOf(ctx, otherId);
+
+    let fromId: number;
+    let toId: number;
+    if (input.direction === "square") {
+      if (owedBetween(ctx.db, ctx.household.id, me, otherId) > 0) [fromId, toId] = [me, otherId];
+      else if (owedBetween(ctx.db, ctx.household.id, otherId, me) > 0) [fromId, toId] = [otherId, me];
+      else return privateInGroup(ctx, { recorded: false, already_square: true, summary: `You and ${other} are already square.` });
+    } else if (input.direction === "they_paid_me") [fromId, toId] = [otherId, me];
+    else [fromId, toId] = [me, otherId];
+
+    let amountCents: number | null = null;
+    if (input.amount !== undefined && input.direction !== "square") {
+      amountCents = parseCents(String(input.amount));
+      if (!amountCents) return { recorded: false, error: "couldn't read the amount. Ask how much." };
+    }
+    const from = nameOf(ctx, fromId);
+    const to = nameOf(ctx, toId);
+    try {
+      const p = recordPayment(ctx.db, { householdId: ctx.household.id, fromId, toId, amountCents, loggedById: me, sourceMessageId: ctx.messageId });
+      const summary = [
+        `Recorded: ${from} paid ${to} ${formatCents(p.amountCents)}.`,
+        p.stillOwedCents > 0 ? `${from} still owes ${to} ${formatCents(p.stillOwedCents)}.` : `${from} and ${to} are now square.`,
+      ].join(" ");
+      dmBoth(ctx, [fromId, toId], `${summary} (logged by ${ctx.member.name}; reply "undo" to remove it)`);
+      if (ctx.isGroup) {
+        return { recorded: true, sent_privately: true, note: "Payments and balances are private. Say it's recorded and you DM'd them both; no amounts." };
+      }
+      return { recorded: true, summary, how_to_fix: "Reply \"undo\" to remove it." };
+    } catch (error) {
+      if (!(error instanceof PaymentError)) throw error;
+      const owed = owedBetween(ctx.db, ctx.household.id, fromId, toId);
+      if (error.message === "nothing is owed") {
+        return privateInGroup(ctx, { recorded: false, nothing_owed: true, summary: `${from} doesn't owe ${to} anything right now, so there's nothing to settle.` });
+      }
+      if (error.message.startsWith("more than")) {
+        // Only the two people involved learn the amount: in the group, send it by DM.
+        const text = `${from} only owes ${to} ${formatCents(owed)}. Did you mean that? Say "${fromId === me ? `I paid ${to} back` : `${from} paid me back`}" to settle it all.`;
+        return privateInGroup(ctx, { recorded: false, too_much: true, summary: text });
+      }
+      return { recorded: false, error: error.message };
+    }
   },
 };
 
@@ -822,6 +926,7 @@ const checkItemTool: ToolDef = {
 export const TOOLS: ToolDef[] = [
   recordExpenseTool,
   undoTool,
+  recordPaymentTool,
   balancesTool,
   shelfLifeTool,
   addItemTool,

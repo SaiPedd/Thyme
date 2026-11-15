@@ -226,4 +226,36 @@ ALTER TABLE expenses ADD COLUMN logged_by_member_id INTEGER REFERENCES members(i
   `
 ALTER TABLE items ADD COLUMN expense_id INTEGER REFERENCES expenses(id);
 `,
+  // 8: settling up. A payment ("I paid Alex back $12") is a balance entry in the other direction, so it nets
+  // against expenses in the same table. SQLite can't change a CHECK, so balance_entries is rebuilt.
+  `
+CREATE TABLE payments (
+  id                   INTEGER PRIMARY KEY,
+  household_id         INTEGER NOT NULL REFERENCES households(id),
+  from_member_id       INTEGER NOT NULL REFERENCES members(id),   -- who paid
+  to_member_id         INTEGER NOT NULL REFERENCES members(id),   -- who got the money
+  amount_cents         INTEGER NOT NULL CHECK (amount_cents > 0),
+  logged_by_member_id  INTEGER NOT NULL REFERENCES members(id),   -- may undo it
+  source_message_id    TEXT,
+  created_at           TEXT NOT NULL,
+  undone_at            TEXT,
+  CHECK (from_member_id <> to_member_id)
+);
+CREATE TABLE balance_entries_v8 (
+  id                  INTEGER PRIMARY KEY,
+  household_id        INTEGER NOT NULL REFERENCES households(id),
+  debtor_member_id    INTEGER NOT NULL REFERENCES members(id),
+  creditor_member_id  INTEGER NOT NULL REFERENCES members(id),
+  amount_cents        INTEGER NOT NULL CHECK (amount_cents > 0),
+  source              TEXT NOT NULL CHECK (source IN ('expense','waste','payment')),
+  source_id           INTEGER NOT NULL,
+  created_at          TEXT NOT NULL,
+  undone_at           TEXT,
+  CHECK (debtor_member_id <> creditor_member_id)
+);
+INSERT INTO balance_entries_v8 SELECT id, household_id, debtor_member_id, creditor_member_id, amount_cents, source, source_id, created_at, undone_at FROM balance_entries;
+DROP TABLE balance_entries;
+ALTER TABLE balance_entries_v8 RENAME TO balance_entries;
+CREATE INDEX balance_by_member ON balance_entries(household_id, debtor_member_id, creditor_member_id);
+`,
 ];
