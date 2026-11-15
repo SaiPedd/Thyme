@@ -11,7 +11,7 @@ import { addItem } from "../src/domain/inventory";
 import { Inbox } from "../src/inbox";
 import { Outbox } from "../src/outbox";
 import { makeRouter } from "../src/router";
-import { Scheduler } from "../src/scheduler";
+import { groupReminderText, Scheduler } from "../src/scheduler";
 import { FakeAdapter, PHONES, quietLog, setupHousehold } from "./helpers";
 
 // 10:00 in New York.
@@ -162,5 +162,18 @@ describe("3-day fake-clock scenario", () => {
     add(db, "strawberries");
     expect((await scheduler.tick())?.groupItems).toEqual([]);
     expect(db.query("SELECT COUNT(*) AS n FROM nudges").get()).toEqual({ n: 0 });
+  });
+});
+
+describe("reminder wording", () => {
+  test("several past-date items: only the first word is capitalized", async () => {
+    const db = setupHousehold();
+    await importFoodKeeperFile(db);
+    setNow(T0);
+    const items = [add(db, "chicken"), add(db, "strawberries")];
+    advanceDays(5);
+    expect(groupReminderText(items, "America/New_York", false)).toBe(
+      'The chicken and the strawberries are past the USDA FoodKeeper date. To be safe, toss them and tell me "tossed the chicken".',
+    );
   });
 });

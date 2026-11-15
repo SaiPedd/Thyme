@@ -1,6 +1,6 @@
 import { afterEach, beforeAll, describe, expect, test } from "bun:test";
 import type { Database } from "bun:sqlite";
-import { parseIntent } from "../src/agent/fallback";
+import { describeToolResult, parseIntent } from "../src/agent/fallback";
 import { runTool, type ToolContext } from "../src/agent/tools";
 import { addDays, resetClock, setNow } from "../src/clock";
 import { getShelfLife, importFoodKeeperFile, pickShelfLife } from "../src/domain/foodkeeper";
@@ -160,5 +160,28 @@ describe("fallback rules for food", () => {
     expect(parseIntent("got spinach and milk")).toEqual({ kind: "add", items: ["spinach", "milk"] });
     expect(parseIntent("got it")).toBeNull();
     expect(parseIntent("tossed the leftover rice")).toEqual({ kind: "toss", item: "leftover rice" });
+  });
+});
+
+describe("end-to-end check fixes", () => {
+  test("'how long does cooked rice last' doesn't answer with the dry rice in the pantry", async () => {
+    const db = await withFoodKeeper();
+    setNow(T0);
+    runTool("add_item", { items: [{ name: "rice", storage: "pantry", state: "raw" }] }, ctxFor(db, 0, true));
+    const r = runTool("check_item", { item: "cooked rice" }, ctxFor(db, 0, true));
+    expect(r.item).toBeUndefined();
+    expect(r.source).toBe("USDA FoodKeeper");
+    expect(JSON.stringify(r)).not.toContain("720");
+    // A full match still answers from inventory.
+    expect(runTool("check_item", { item: "the rice" }, ctxFor(db, 0, true)).item).toBe("rice");
+  });
+
+  test("claiming a past-date plural item uses plural wording", () => {
+    expect(describeToolResult("claim_item", { past_usda_date: true, item: "strawberries" })).toBe(
+      "The strawberries are past their USDA FoodKeeper date, so please toss them instead.",
+    );
+    expect(describeToolResult("claim_item", { past_usda_date: true, item: "milk" })).toBe(
+      "The milk is past its USDA FoodKeeper date, so please toss it instead.",
+    );
   });
 });

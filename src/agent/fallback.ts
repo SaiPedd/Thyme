@@ -174,7 +174,10 @@ export function describeToolResult(name: string, r: Record<string, any>): string
         const [is, it] = isPlural(String(r.item)) ? ["are", "They"] : ["is", "It"];
         return r.note === "already theirs" ? `The ${r.item} ${is} already yours.` : `The ${r.item} ${is} yours! ${it} ${agree(String(r.item), String(r.status))}.`;
       }
-      if (r.past_usda_date) return `The ${r.item} is past its USDA FoodKeeper date, so please toss it instead.`;
+      if (r.past_usda_date) {
+        const [is, its, it] = isPlural(String(r.item)) ? ["are", "their", "them"] : ["is", "its", "it"];
+        return `The ${r.item} ${is} past ${its} USDA FoodKeeper date, so please toss ${it} instead.`;
+      }
       if (r.winner) return `Sorry, ${r.winner} already claimed the ${r.item}.`;
       if (r.which_one) return `Which one: ${(r.which_one as string[]).join(" or ")}?`;
       return "Which item do you want to claim?";

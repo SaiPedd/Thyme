@@ -18,6 +18,7 @@ import {
   isPast,
   itemNote,
   matchItem,
+  nameWords,
   setItemStatus,
   visibleItems,
   type Item,
@@ -720,7 +721,10 @@ const checkItemTool: ToolDef = {
     additionalProperties: false,
   },
   run(input, ctx) {
-    const item = findItem(ctx.db, ctx.household.id, ctx.member.id, String(input.item ?? ""), { sharedOnly: ctx.isGroup });
+    const phrase = String(input.item ?? "");
+    const found = findItem(ctx.db, ctx.household.id, ctx.member.id, phrase, { sharedOnly: ctx.isGroup });
+    // Only answer from inventory when every word matches: "cooked rice" is not the dry rice in the pantry.
+    const item = found && nameWords(phrase).every((w) => nameWords(found.name).includes(w)) ? found : null;
     if (item) {
       const past = isPast(item);
       return {
