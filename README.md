@@ -1,4 +1,4 @@
-# Fridge Squad 🌿 meet Thyme
+# Thyme 🌿
 
 **Thyme** is an iMessage agent for roommates. Add it to your household group chat (or text it directly)
 and it splits grocery bills, keeps track of what's in the fridge before it spoils, answers kitchen
