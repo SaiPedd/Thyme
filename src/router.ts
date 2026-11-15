@@ -52,7 +52,6 @@ export interface RouterDeps {
 const RECEIPT_ERRORS: Record<ReceiptError["code"], string> = {
   download: "I couldn't download that photo. Could you send it again?",
   not_image: "That doesn't look like a photo. Send a picture of the receipt and I'll read it.",
-  too_big: "That photo is too large for me. Could you send a smaller one?",
   timeout: "Reading that receipt took too long. Try a clearer, closer photo, or type it like \"groceries $48.60 split 3 ways\".",
   unreadable: "I couldn't read a receipt in that photo. Try a clearer, flatter shot, or type it like \"groceries $48.60 split 3 ways\".",
   llm: "I'm having trouble reading receipts right now. You can type it like \"groceries $48.60 split 3 ways\".",
@@ -214,14 +213,17 @@ export function makeRouter(deps: RouterDeps) {
       else await deps.outbox.send({ audience: { kind: "member", memberId: member.id }, text, sensitivity: "personal", subjectMemberId: member.id }, { kind: "reply" });
       saveTurn(db, m.chatId, null, "assistant", text, at);
     };
-    const rctx = { db, householdId: household.id, tz: household.tz, members, member, messageId: m.messageId, isGroup: m.isGroup };
+    const receiptDrafts: Draft[] = [];
+    const rctx = { db, householdId: household.id, tz: household.tz, members, member, messageId: m.messageId, isGroup: m.isGroup, drafts: receiptDrafts };
 
     // A reply to this person's pending receipt ("yes", "Sam paid", "2 is mine", "cancel"): handled in code.
     const images = m.attachments.filter(maybeImage);
-    if (!images.length && getPendingReceipt(db, member.id) && parseReceiptReply(triggers.strip(m.text), members, member.id)) {
+    const receiptReply = images.length ? null : handleReceiptReply(rctx, triggers.strip(m.text));
+    if (receiptReply) {
       saveTurn(db, m.chatId, member, "user", shown, at);
       log(`[in] ${m.isGroup ? "group" : "dm"} from ${mask(phone)}: receipt reply`);
-      await reply(handleReceiptReply(rctx, triggers.strip(m.text))!);
+      await reply(receiptReply);
+      for (const d of receiptDrafts) await deps.outbox.send(d, { kind: "reply" });
       return;
     }
 

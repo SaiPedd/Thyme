@@ -6,6 +6,7 @@
 //   "2 is mine"     -> item 2 is the sender's; "3 and 4 are Jordan's"; "5 is me and Sam's"; "2 is shared" undoes it
 //   "split with Sam only" / "split between me and Jordan" / "just me and Sam" -> who shares the rest
 //   "total is $X"   -> use a corrected total when the numbers don't add up
+//   "4 was bananas" -> names a blurry line whose price was worked out from the total ("it was bananas" works too)
 //   "yes"           -> record the expense (source receipt) and add the food to the fridge
 //   "cancel"        -> drop it
 
@@ -15,6 +16,7 @@ import { DuplicateExpenseError, recordExpense } from "../domain/expenses";
 import { memberByName, type Member } from "../domain/household";
 import { addItem } from "../domain/inventory";
 import { formatCents, parseCents } from "../domain/money";
+import type { Draft } from "../privacy/projection";
 import { allocate, type CheckedReceipt, type ReceiptLine } from "./receipt";
 
 export const RECEIPT_TTL_MS = 60 * 60 * 1000;
@@ -199,7 +201,8 @@ export function receiptSummary(p: PendingReceipt, members: Member[]): string {
   const name = (id: number) => members.find((m) => m.id === id)?.name ?? "someone";
   const lines = [`Got ${p.store ? `the ${p.store}` : "your"} receipt:`];
   const who = (ids: number[]) => (ids.length === 1 ? `just ${name(ids[0]!)}'s` : list(ids.map(name)));
-  p.items.forEach((it, i) => lines.push(`${i + 1}. ${it.name} ${formatCents(it.cents)}${it.owners?.length ? ` (${who(it.owners)})` : ""}`));
+  const note = (it: ReceiptLine) => (it.inferred ? " (blurry, worked out from the total)" : it.unclear ? ` (${it.unclear} lines I couldn't read)` : "");
+  p.items.forEach((it, i) => lines.push(`${i + 1}. ${it.name} ${formatCents(it.cents)}${it.owners?.length ? ` (${who(it.owners)})` : ""}${note(it)}`));
   const extras = [
     ...(p.discountCents ? [`savings -${formatCents(p.discountCents)}`] : []),
     ...(p.taxCents ? [`tax ${formatCents(p.taxCents)}`] : []),
@@ -210,7 +213,13 @@ export function receiptSummary(p: PendingReceipt, members: Member[]): string {
     const computed = p.totalCents + p.diffCents;
     lines.push(`Heads up: the lines add up to ${formatCents(computed)}, but the total says ${formatCents(p.totalCents)}. Reply "total is $X" to fix it, or "yes" to use ${formatCents(p.totalCents)}.`);
   }
-  if (p.unreadable) lines.push(`I couldn't read ${p.unreadable} line${p.unreadable === 1 ? "" : "s"}. Is anything missing? You can say "total is $X".`);
+  if (p.unreadable) {
+    lines.push(`I couldn't read ${p.unreadable} line${p.unreadable === 1 ? "" : "s"}. Is anything missing? You can say "total is $X", or send a clearer photo.`);
+  }
+  const inferred = p.items.findIndex((it) => it.inferred);
+  if (inferred >= 0) lines.push(`Line ${inferred + 1} was blurry. What was it? (e.g. "${inferred + 1} was bananas")`);
+  const unclear = p.items.find((it) => it.unclear);
+  if (unclear) lines.push(`I couldn't read ${unclear.unclear} lines, so they're counted as shared "other groceries" unless you tell me what they were.`);
   const assigned = p.items.some((it) => it.owners?.length);
   const among = p.splitAmong ? `split between ${list(p.splitAmong.map(name))}` : "split evenly with everyone";
   lines.push(`Paid by ${name(p.buyerId)}. ${assigned ? `The rest is ${among}` : `Everything is ${among}`}${p.splitAmong ? "." : " unless you say otherwise."}`);
@@ -227,12 +236,40 @@ export interface ReceiptContext {
   members: Member[];
   member: Member;
   messageId?: string;
+  isGroup?: boolean;
+  /** Extra messages to send after the reply (e.g. the split to the group when confirmed in a DM). */
+  drafts?: Draft[];
+}
+
+/**
+ * "4 was bananas" / "it was bananas": names a blurry line. Only for lines we filled in from the total,
+ * and only when the words aren't a roommate ("4 is Sam's" stays an owner change).
+ */
+function renameBlurry(p: PendingReceipt, text: string, members: Member[], senderId: number): number | null {
+  const t = text.trim().replace(/[.!]+$/, "").toLowerCase();
+  const m = /^(?:(?:item|line)\s*|#)?(\d{1,2})\s+(?:is|was)\s+(?:a |an |the )?(.+)$/.exec(t) ?? /^(?:it|that|the blurry one|the missing one)\s+(?:is|was)\s+(?:a |an |the )?(.+)$/.exec(t);
+  if (!m) return null;
+  const index = m.length === 3 && /^\d/.test(m[1]!) ? Number(m[1]) - 1 : p.items.findIndex((it) => it.inferred || it.unclear);
+  const name = (m.length === 3 && /^\d/.test(m[1]!) ? m[2] : m[1])!.trim();
+  const line = p.items[index];
+  if (!line || !(line.inferred || line.unclear)) return null;
+  if (/^(mine|shared|everyone'?s?|for everyone)$/.test(name) || resolve(members, senderId, name.split(/\s+/)[0]!) !== null) return null;
+  line.name = name.slice(0, 60);
+  line.inferred = false;
+  line.unclear = undefined;
+  line.named = true;
+  return index;
 }
 
 /** Handle a reply to the sender's pending receipt. Returns the reply text, or null if not about the receipt. */
 export function handleReceiptReply(ctx: ReceiptContext, text: string): string | null {
   const p = getPendingReceipt(ctx.db, ctx.member.id);
   if (!p) return null;
+  if (renameBlurry(p, text, ctx.members, ctx.member.id) !== null) {
+    p.at = now().toISOString();
+    savePendingReceipt(ctx.db, p);
+    return receiptSummary(p, ctx.members);
+  }
   const r = parseReceiptReply(text, ctx.members, ctx.member.id);
   if (!r) return null;
   if (r.error) return r.error;
@@ -294,6 +331,8 @@ function commitReceipt(ctx: ReceiptContext, p: PendingReceipt, allowDuplicate: b
   let added = 0;
   const skipped: string[] = [];
   for (const it of p.items) {
+    // Lumped or still-unnamed blurry lines are money only: we don't know what food they were.
+    if (it.unclear || (it.inferred && !it.named)) continue;
     if (NOT_FOOD.test(it.name)) {
       skipped.push(it.name);
       continue;
@@ -317,6 +356,14 @@ function commitReceipt(ctx: ReceiptContext, p: PendingReceipt, allowDuplicate: b
     .filter((s) => s.memberId !== expense.buyerId && s.cents > 0)
     .map((s) => `${name(s.memberId)} owes ${payer} ${formatCents(s.cents)}`);
   const payerShare = expense.shares.find((s) => s.memberId === expense.buyerId)?.cents ?? 0;
+  // Confirmed in a DM: roommates still need to see what they owe (a shared split is household content).
+  if (ctx.isGroup === false && ctx.drafts) {
+    ctx.drafts.push({
+      audience: { kind: "group" },
+      sensitivity: "household",
+      text: [`${name(ctx.member.id)} logged ${p.store ? `a ${p.store}` : "a"} receipt: ${formatCents(expense.totalCents)} paid by ${payer}.`, ...owes].join("\n"),
+    });
+  }
   return [
     `Saved: ${formatCents(expense.totalCents)} paid by ${payer}.`,
     ...owes,
