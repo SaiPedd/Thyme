@@ -3,7 +3,7 @@
 // Usage: bun run load-foodkeeper [path/to/foodkeeper.json]
 
 import { openDb } from "../src/db";
-import { DEFAULT_FOODKEEPER_PATH, importFoodKeeperFile } from "../src/foodkeeper";
+import { DEFAULT_FOODKEEPER_PATH, importFoodKeeperFile } from "../src/domain/foodkeeper";
 
 const db = openDb();
 try {

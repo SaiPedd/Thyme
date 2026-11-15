@@ -1,96 +1,78 @@
-import { Spectrum } from "spectrum-ts";
-import { imessage } from "spectrum-ts/providers/imessage";
-import { terminal } from "spectrum-ts/providers/terminal";
+// Fridge Squad entry point.
+//   bun run start   -> Claw Messenger (real iMessage)
+//   bun run chat    -> terminal adapter (dev, spends no messages)
+
+import { ClawAdapter } from "./src/adapters/claw";
+import { TerminalAdapter } from "./src/adapters/terminal";
+import type { Adapter } from "./src/adapters/types";
+import { makeClient } from "./src/agent/loop";
+import { loadConfig, printPreflight } from "./src/config";
 import { openDb } from "./src/db";
-import { ensureShelfLife } from "./src/foodkeeper";
-import { mask, normalizeHandle, parseProviders } from "./src/providers";
+import { ensureShelfLife } from "./src/domain/foodkeeper";
+import { getHousehold, getMembers } from "./src/domain/household";
+import { Inbox } from "./src/inbox";
+import { Outbox } from "./src/outbox";
+import { makeRouter } from "./src/router";
 
-// Step 1: echo bot. PROVIDERS (in .env) picks any of: terminal, imessage (Photon cloud).
-// Cloud iMessage needs SPECTRUM_PROJECT_ID / SPECTRUM_PROJECT_SECRET; never print them.
-// Safety guard while testing: only echo iMessage senders in ECHO_ALLOWLIST.
+const useTerminal = process.argv.includes("--terminal") || process.env.ADAPTER === "terminal";
+const loaded = loadConfig(process.env, { requireClaw: !useTerminal });
+if (!printPreflight(loaded)) process.exit(1);
+const { config } = loaded;
 
-let names;
-try {
-  names = parseProviders(process.env.PROVIDERS);
-} catch (error) {
-  console.error(`[start] ${(error as Error).message}`);
+const db = openDb(config.dbPath);
+await ensureShelfLife(db);
+const household = getHousehold(db);
+if (!household) {
+  console.error("[start] no household yet: run `bun run seed` first");
+  process.exit(1);
+}
+const members = getMembers(db, household.id);
+if (useTerminal && members.length === 0) {
+  console.error("[start] the terminal chat needs roommates: run `bun run seed --demo` (or set SEED_MEMBERS)");
   process.exit(1);
 }
 
-const useCloud = names.includes("imessage");
-const projectId = process.env.SPECTRUM_PROJECT_ID;
-const projectSecret = process.env.SPECTRUM_PROJECT_SECRET;
-if (useCloud) {
-  const missing = [
-    !projectId && "SPECTRUM_PROJECT_ID",
-    !projectSecret && "SPECTRUM_PROJECT_SECRET",
-  ].filter(Boolean);
-  if (missing.length) {
-    console.error(`[start] PROVIDERS includes imessage but ${missing.join(" and ")} missing in .env`);
-    process.exit(1);
-  }
-}
+const inboxRef: { current?: Inbox } = {};
+// In terminal mode, use the real group chat id if one is known, else a stand-in that is never saved.
+const devGroupChatId = useTerminal ? (household.chat_id ?? "terminal-group") : undefined;
+const adapter: Adapter = useTerminal
+  ? new TerminalAdapter(members.map((m) => ({ name: m.name, phone: m.phone })), devGroupChatId!, config.botName)
+  : new ClawAdapter({ apiKey: config.clawApiKey!, lastSeenAt: () => inboxRef.current?.lastSeenAt() ?? null });
 
-// Database: create tables, and import USDA FoodKeeper on first run.
-const db = openDb();
-try {
-  const imported = await ensureShelfLife(db);
-  if (imported) console.log(`[start] imported ${imported} FoodKeeper products`);
-} catch (error) {
-  console.error(`[start] FoodKeeper import failed: ${(error as Error).message}`);
-  process.exit(1);
-}
+const outbox = new Outbox(db, adapter, { devGroupChatId });
+const router = makeRouter({
+  db,
+  outbox,
+  adapter,
+  botName: config.botName,
+  botAliases: config.botAliases,
+  model: config.geminiModel,
+  client: makeClient({ llm: config.llm, apiKey: config.geminiApiKey }),
+  devGroupChatId,
+});
+const inbox = new Inbox(db, router, {
+  debounceMs: useTerminal ? 300 : 2000,
+  onAccepted: () => {
+    if (!useTerminal) outbox.recordInbound();
+  },
+  log: (l) => console.log(l),
+});
+inboxRef.current = inbox;
 
-const allowlist = new Set(
-  (process.env.ECHO_ALLOWLIST ?? "")
-    .split(",")
-    .map((s) => s.trim())
-    .filter(Boolean)
-    .map(normalizeHandle),
+await adapter.start({ onMessage: (m) => inbox.push(m), onStatus: (s) => outbox.markStatus(s) });
+console.log(
+  `[start] ${adapter.name} adapter, household "${household.name}" (${members.length} members, ${household.mode} mode), agent ${
+    config.llm && config.geminiApiKey ? config.geminiModel : "fallback rules"
+  }`,
 );
 
-const providers = [
-  ...(names.includes("terminal") ? [terminal.config()] : []),
-  ...(useCloud ? [imessage.config()] : []),
-];
-
-// Runtime-selected list, so types lose which providers are present.
-const app = useCloud
-  ? await Spectrum({ projectId: projectId!, projectSecret: projectSecret!, providers: providers as any })
-  : await Spectrum({ providers: providers as any });
-console.log(`[start] providers=${names.join(",")}`);
+// Send proactive messages deferred by quiet hours once they're due. (The full scheduler is Phase 3.)
+const flusher = setInterval(() => void outbox.flushDue(), 60_000);
 
 process.on("SIGINT", async () => {
-  await app.stop();
+  clearInterval(flusher);
+  await inbox.drain();
+  await adapter.stop();
   db.close();
   process.exit(0);
 });
-
-for await (const [space, message] of app.messages) {
-  if (message.direction === "outbound") continue;
-  if (message.content.type !== "text") continue;
-
-  let who = "";
-  if (imessage.is(message)) {
-    const sender = normalizeHandle(message.sender?.id ?? "");
-    const allowed = allowlist.has(sender);
-    who = ` ${mask(sender)}`;
-    const kind = (message.space as { type?: string }).type ?? "?";
-    console.log(`[in] ${message.platform} ${kind} from${who} allowlisted=${allowed}`);
-    // Groups are echoed too. Later features must only post shared household info in
-    // groups; personal items stay in the owner's DM (CLAUDE.md).
-    if (!allowed) continue;
-  } else {
-    console.log(`[in] ${message.platform}`);
-  }
-
-  const text = message.content.text;
-  try {
-    await space.responding(async () => {
-      await space.send(`echo: ${text}`);
-    });
-    console.log(`[out] ${message.platform} to${who} ok`);
-  } catch (error) {
-    console.log(`[out] ${message.platform} to${who} failed: ${(error as Error).message}`);
-  }
-}
