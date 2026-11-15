@@ -98,7 +98,8 @@ function priceItemsFromLines(ctx: ToolContext, buyerId: number, lines: { descrip
     if (!item) continue;
     setItemPrice(ctx.db, item.id, line.cents, "user");
     candidates = candidates.filter((c) => c.id !== item.id);
-    named.push(item.name);
+    // Never name a personal item in the group.
+    if (!(ctx.isGroup && item.owner_member_id !== null)) named.push(item.name);
   }
   return named;
 }
@@ -363,6 +364,12 @@ const addItemTool: ToolDef = {
   },
 };
 
+/** Fixed wording for a use/toss result (also used for the private DM about a personal item). */
+export function describeStatus(r: { item: string; status: string; rescued?: boolean; wasted_cost?: string }): string {
+  if (r.status === "tossed") return r.wasted_cost ? `Marked the ${r.item} as tossed (${r.wasted_cost} of food wasted).` : `Marked the ${r.item} as tossed.`;
+  return r.rescued ? `Nice save! The ${r.item} was about to expire. Marked as used.` : `Marked the ${r.item} as used.`;
+}
+
 function statusTool(name: "use_item" | "log_toss", status: "used" | "tossed", description: string): ToolDef {
   return {
     name,
@@ -374,24 +381,37 @@ function statusTool(name: "use_item" | "log_toss", status: "used" | "tossed", de
       additionalProperties: false,
     },
     run(input, ctx) {
-      const item = findItem(ctx.db, ctx.household.id, ctx.member.id, String(input.item ?? ""));
+      const phrase = String(input.item ?? "");
+      const item = findItem(ctx.db, ctx.household.id, ctx.member.id, phrase);
       if (!item) return { done: false, note: `nothing called "${input.item}" in the fridge list` };
+      // A personal item named in the group: do it, but confirm by DM and never name it in the group.
+      const privately = ctx.isGroup && item.owner_member_id !== null;
       // "tossed the spinach" ... "no, I threw it out": don't toss a second, different spinach.
-      const again = recentlyChanged(ctx.db, ctx.household.id, status, String(input.item ?? ""), item);
+      const again = recentlyChanged(ctx.db, ctx.household.id, ctx.member.id, status, phrase, item);
       if (again) {
+        if (ctx.isGroup && (again.owner_member_id !== null || privately)) {
+          return { done: false, already_done: true, note: "That was already done a moment ago. Don't name the item in the group." };
+        }
         return { done: false, already: again.name, status, note: `The ${again.name} was already marked ${status} a moment ago. Only call again if they say it's a different one (the ${item.name}).` };
       }
       const rescued = status === "used" && isAtRisk(item) && !isPast(item);
       setItemStatus(ctx.db, item.id, status, ctx.member.id);
-      // The cost is only shown when someone said what they paid, and never for a personal item in the group.
-      const showCost = status === "tossed" && item.cost_cents !== null && (item.owner_member_id === null || !ctx.isGroup);
-      return {
+      const facts = {
         done: true,
         item: item.name,
         status,
         ...(rescued ? { rescued: true, note: "It was about to expire: a rescue." } : {}),
-        ...(showCost ? { wasted_cost: formatCents(item.cost_cents!) } : {}),
+        // The cost is only shown when someone said what they paid.
+        ...(status === "tossed" && item.cost_cents !== null ? { wasted_cost: formatCents(item.cost_cents) } : {}),
       };
+      if (!privately) return facts;
+      ctx.drafts.push({
+        audience: { kind: "member", memberId: ctx.member.id },
+        sensitivity: "personal",
+        subjectMemberId: ctx.member.id,
+        text: describeStatus(facts),
+      });
+      return { done: true, personal_logged_privately: true, note: "It was one of their own items: confirmed by DM. Don't name it or its cost in the group." };
     },
   };
 }

@@ -122,7 +122,7 @@ bun run seed             # reset: one household, empty kitchen; roommates join f
 bun run seed --demo      # fictional roommates (Alex, Sam, Jordan) and a starter fridge for the terminal chat
 bun run chat             # talk to Thyme in the terminal (/as <name>, /group, /dm); sends no real messages
 bun start                # run Thyme on Claw Messenger (real iMessage)
-bun test                 # 138 tests
+bun test                 # 140 tests
 bun run typecheck
 ```
 

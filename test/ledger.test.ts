@@ -110,10 +110,47 @@ describe("waste summary privacy", () => {
     expect(sam.yours.all_time.wasted).toEqual({ items: 0, known_cost: "$0.00" });
   });
 
-  test("a personal item tossed in the group doesn't show its cost there", async () => {
+  test("a personal item tossed in the group: done, but named (with its cost) only in the owner's DM", async () => {
     const db = await kitchen();
     runTool("add_item", { items: [{ name: "chicken thighs", state: "raw", owner: "me", price: "$9" }] }, ctxFor(db, 0, false));
-    expect(runTool("log_toss", { item: "chicken thighs" }, ctxFor(db, 0, true))).not.toHaveProperty("wasted_cost");
+    const ctx = ctxFor(db, 0, true);
+    const r = runTool("log_toss", { item: "chicken thighs" }, ctx);
+    expect(r).toMatchObject({ done: true, personal_logged_privately: true });
+    expect(JSON.stringify(r)).not.toContain("chicken");
+    expect(JSON.stringify(r)).not.toContain("$9");
+    expect(describeToolResult("log_toss", r)).toBe("Done, I DM'd you the details.");
+    expect(ctx.drafts).toHaveLength(1);
+    expect(ctx.drafts[0]).toMatchObject({ audience: { kind: "member", memberId: 1 }, sensitivity: "personal", subjectMemberId: 1 });
+    expect(ctx.drafts[0]!.text).toBe("Marked the chicken thighs as tossed ($9.00 of food wasted).");
+    expect(ledgerRows(db)).toEqual([{ kind: "wasted", cost_cents: 900, priced: 1, shared: 0, member_id: 1 }]);
+
+    // Saying it again in the group doesn't name it either.
+    runTool("add_item", { items: [{ name: "chicken thighs", state: "raw", owner: "me" }] }, ctxFor(db, 0, false));
+    const again = runTool("log_toss", { item: "chicken thighs" }, ctxFor(db, 0, true));
+    expect(again).toMatchObject({ done: false, already_done: true });
+    expect(JSON.stringify(again)).not.toContain("chicken");
+  });
+
+  test("the 'already tossed' check never names someone else's personal item", async () => {
+    const db = await kitchen();
+    // Alex tosses their own chicken in a DM.
+    runTool("add_item", { items: [{ name: "chicken thighs", state: "raw", owner: "me" }] }, ctxFor(db, 0, false));
+    runTool("log_toss", { item: "chicken thighs" }, ctxFor(db, 0, false));
+    // Sam then tosses the shared chicken: it's done, and Alex's chicken isn't mentioned.
+    runTool("add_item", { items: [{ name: "chicken", state: "raw" }] }, ctxFor(db, 1, false));
+    const r = runTool("log_toss", { item: "chicken" }, ctxFor(db, 1, false));
+    expect(r).toMatchObject({ done: true, item: "chicken" });
+    expect(JSON.stringify(r)).not.toContain("thighs");
+  });
+
+  test("using a personal item in the group is confirmed by DM", async () => {
+    const db = await kitchen();
+    runTool("add_item", { items: [{ name: "greek yogurt", owner: "me" }] }, ctxFor(db, 1, false));
+    const ctx = ctxFor(db, 1, true);
+    const r = runTool("use_item", { item: "yogurt" }, ctx);
+    expect(r).toMatchObject({ done: true, personal_logged_privately: true });
+    expect(JSON.stringify(r)).not.toContain("yogurt");
+    expect(ctx.drafts[0]!.text).toContain("greek yogurt");
   });
 });
 

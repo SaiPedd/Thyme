@@ -4,7 +4,7 @@
 // food preferences, "is the X still good?", and "forget me".
 // Uses the same tools as the agent, so facts come from code either way.
 
-import { runTool, type ToolContext } from "./tools";
+import { describeStatus, runTool, type ToolContext } from "./tools";
 import { agree, isPlural } from "../domain/inventory";
 
 export type Intent =
@@ -152,13 +152,12 @@ export function describeToolResult(name: string, r: Record<string, any>): string
       return lines.join("\n") || "I didn't catch which food that was.";
     }
     case "use_item":
-      if (r.already) return `The ${r.already} is already marked as used.`;
-      if (!r.done) return `I don't see that in the fridge list.`;
-      return r.rescued ? `Nice save! The ${r.item} was about to expire. Marked as used.` : `Marked the ${r.item} as used.`;
     case "log_toss":
-      if (r.already) return `The ${r.already} is already marked as tossed.`;
+      if (r.personal_logged_privately) return "Done, I DM'd you the details.";
+      if (r.already_done) return "That's already done.";
+      if (r.already) return `The ${r.already} is already marked as ${name === "use_item" ? "used" : "tossed"}.`;
       if (!r.done) return `I don't see that in the fridge list.`;
-      return r.wasted_cost ? `Marked the ${r.item} as tossed (${r.wasted_cost} of food wasted).` : `Marked the ${r.item} as tossed.`;
+      return describeStatus(r as Parameters<typeof describeStatus>[0]);
     case "get_waste_summary": {
       type T = { items: number; known_cost: string; items_with_no_price?: number };
       const part = (label: string, t: T) =>
