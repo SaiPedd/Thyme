@@ -4,7 +4,7 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import type { Database } from "bun:sqlite";
 import { parseIntent } from "../src/agent/fallback";
-import { runTool, type ToolContext } from "../src/agent/tools";
+import { runTool, runToolAsync, type ToolContext } from "../src/agent/tools";
 import { addDays, advanceDays, resetClock, setNow } from "../src/clock";
 import { importFoodKeeperFile } from "../src/domain/foodkeeper";
 import { getHousehold, getMembers, parseNameIntro } from "../src/domain/household";
@@ -38,13 +38,18 @@ function ctxFor(db: Database, memberIndex = 0, isGroup = true): ToolContext {
 const items = (db: Database) => db.query<Item, []>("SELECT * FROM items WHERE status = 'fresh' ORDER BY expires_at").all();
 
 describe("recipe validation", () => {
-  test("every ingredient must be in the kitchen; salt, oil, and water are assumed", async () => {
+  test("every ingredient must be in the kitchen; pantry staples are assumed", async () => {
     const db = await kitchen(["eggs", "baby spinach"]);
     expect(validateRecipe(["eggs", "spinach", "salt", "olive oil"], items(db), []).ok).toBe(true);
     const bad = validateRecipe(["eggs", "spinach", "feta"], items(db), []);
     expect(bad.ok).toBe(false);
     expect(bad.missing).toEqual(["feta"]);
-    expect(isStaple("black pepper")).toBe(false); // "salt and oil" only
+    // Staples: salt, pepper, garlic, oils, dried/ground spices, pantry basics.
+    for (const s of ["black pepper", "garlic", "olive oil", "smoked paprika", "ground cumin", "dried oregano", "soy sauce", "chilli flakes"]) {
+      expect(isStaple(s)).toBe(true);
+    }
+    // Perishables are never assumed; they must be in the inventory.
+    for (const s of ["butter", "milk", "fresh coriander", "chicken", "feta", "lemon"]) expect(isStaple(s)).toBe(false);
   });
 
   test("food past its USDA date is never used", async () => {
@@ -93,19 +98,19 @@ describe("preferences", () => {
   test("recipes honor everyone eating: a vegetarian never gets chicken, and an egg allergy rules out eggs", async () => {
     const db = await kitchen(["chicken", "rice", "eggs", "baby spinach"]);
     savePref(db, 2, "diet", "vegetarian");
-    const sam = runTool("suggest_recipe", {}, ctxFor(db, 1, false)) as any;
+    const sam = await runToolAsync("suggest_recipe", {}, ctxFor(db, 1, false)) as any;
     expect(sam.ok).toBe(true);
     expect(JSON.stringify(sam.ingredients)).not.toContain("chicken");
 
     savePref(db, 3, "allergy", "eggs");
-    const both = runTool("suggest_recipe", { for: ["Sam", "Jordan"] }, ctxFor(db, 1, false)) as any;
+    const both = await runToolAsync("suggest_recipe", { for: ["Sam", "Jordan"] }, ctxFor(db, 1, false)) as any;
     expect(JSON.stringify(both.ingredients ?? [])).not.toMatch(/chicken|egg/);
   });
 
   test("a model-proposed recipe that breaks a preference or uses missing food is rejected", async () => {
     const db = await kitchen(["chicken", "rice"]);
     savePref(db, 1, "diet", "vegetarian");
-    const r = runTool("suggest_recipe", { recipe: { title: "Chicken bowl", ingredients: ["chicken", "rice", "avocado"], steps: ["cook"] } }, ctxFor(db, 0, false)) as any;
+    const r = await runToolAsync("suggest_recipe", { recipe: { title: "Chicken bowl", ingredients: ["chicken", "rice", "avocado"], steps: ["cook"] } }, ctxFor(db, 0, false)) as any;
     expect(r.ok).toBe(false);
     expect(r.missing_from_kitchen).toEqual(["avocado"]);
     expect(r.conflicts).toEqual(["chicken: not vegetarian"]);
@@ -117,7 +122,7 @@ describe("preferences", () => {
     const saved = runTool("save_preference", { kind: "allergy", value: "peanuts" }, save);
     expect(JSON.stringify(saved)).not.toContain("peanut");
 
-    const r = runTool("suggest_recipe", { for: ["everyone"] }, ctxFor(db, 0, true));
+    const r = await runToolAsync("suggest_recipe", { for: ["everyone"] }, ctxFor(db, 0, true));
     const out = JSON.stringify(r);
     expect(out).not.toContain("Jordan");
     expect(out).toContain("can't promise");

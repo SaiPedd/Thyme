@@ -39,7 +39,11 @@ Channel: Claw Messenger (https://www.clawmessenger.com/docs) behind one adapter 
 - Expiry dates come only from the USDA FoodKeeper table. The model only maps a phrase to a table entry.
   `expires_at` uses the conservative low end. Ask raw or cooked when ambiguous.
 - Money is integer cents. Split shares always sum exactly to the total; leftover cents go to the buyer.
-- Recipe suggestions must only use ingredients currently in inventory. Validate in code.
+- Recipe suggestions are checked in code against the inventory. Pantry staples (salt, pepper, garlic, oils, dried
+  spices and herbs, onions, stock, flour, sugar...) are assumed; perishables must be in the inventory.
+  Built-in recipes need every non-staple ingredient. TheMealDB recipes need half or more of their main ingredients,
+  and code lists what's missing ("you'd also need"); a closest match is offered, labeled as such, only if nothing
+  fits better. Diet, dislike, and allergy conflicts always rule a recipe out. Credit TheMealDB when showing its recipes.
 - Food safety answers are conservative. If unsure, say to toss. Never claim a dish is safe for an allergy.
 - The agent loop runs at most 6 tool iterations with a 10 second timeout. On failure or LLM=off, use the rule-based fallback.
 - Receipt images: download in the handler, then discard the bytes after parsing. Never store card digits.

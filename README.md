@@ -113,9 +113,10 @@ bun run spike            # check Claw connectivity, group chats, and photo attac
 bun run register-phones  # register CLAW_TEST_NUMBERS with Claw
 bun run seed             # one household + a starting fridge; roommates join from the group chat
 bun run seed --demo      # fictional roommates (Alex, Sam, Jordan) for the terminal chat
+bun run mealdb-warm      # pre-cache TheMealDB recipes for what's in the kitchen (run before a demo)
 bun run chat             # talk to Thyme in the terminal (/as <name>, /group, /dm); sends no real messages
 bun start                # run Thyme on Claw Messenger (real iMessage)
-bun test                 # 90 tests
+bun test                 # 136 tests
 bun run typecheck
 ```
 
@@ -144,6 +145,12 @@ data/foodkeeper.json     USDA FoodKeeper data
 - **Shelf life:** [USDA FSIS FoodKeeper](https://catalog.data.gov/dataset/fsis-foodkeeper-data) (public domain).
   Imported into SQLite on first start. Expiry uses the conservative low end of each range. Foods where
   USDA gives guidance instead of a number (milk: "Package use-by date") keep that guidance.
+- **Recipes:** recipe data and imagery from [TheMealDB](https://www.themealdb.com/), plus 16 built-in recipes.
+  - Thyme searches TheMealDB for the food that's about to expire, and suggests recipes where you already have
+    half or more of the main ingredients. Pantry staples like salt, pepper, garlic and spices are assumed.
+  - It tells you exactly what else you'd need, and links the full recipe.
+  - Lookups are cached locally; run `bun run mealdb-warm` before a demo.
+  - Uses TheMealDB's free development key (`MEALDB_API_KEY=1`); a public release needs a supporter key.
 
 ## Known limitations
 
