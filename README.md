@@ -17,7 +17,7 @@ Full build plan: [PLAN.md](PLAN.md).
 | 3 | Inventory and expiry tracking, reminders, claims on expiring food | Done |
 | 4 | Kitchen companion: recipes from what's in the fridge, saved preferences | Done |
 | 5 | Waste ledger: tosses and rescues, shared waste in the same balances | Done |
-| 6 | Receipt photos (stretch) | Next |
+| 6 | Receipt photos (stretch) | Built, needs a phone test |
 | 7 | Demo polish, eval script | Planned |
 
 ## What works today
@@ -48,6 +48,10 @@ Thyme:  Cooked rice lasts 4-6 days in the fridge according to the USDA FoodKeepe
 - **Expense splitting:** equal, per item ("the chicken is just mine"), between some roommates ("the milk
   is me and Sam"), or fixed amounts ("Sam owes 8"). Also undo, duplicate detection, and balances
   that net out across everything.
+- **Receipt photos:** send a photo of a grocery receipt. Thyme reads the items, tax, and total, checks that
+  they add up, and shows the list. Reply "Sam paid" if someone else bought it, "2 is mine" or "3 and 4 are
+  Jordan's" for items that aren't shared, then "yes". It splits the bill (each kept item carries its share of tax)
+  and adds the food to the fridge list with the real prices. Nothing is saved before "yes", and the photo is never stored.
 - **Roommates and names:** whoever is in the household group becomes a roommate. Thyme asks each person
   their name once and welcomes anyone added later.
 - **Getting its attention:** say "Thyme" (or an alias from `BOT_ALIASES`) anywhere in a message. In the group
@@ -121,9 +125,9 @@ bun run spike            # check Claw connectivity, group chats, and photo attac
 bun run register-phones  # register CLAW_TEST_NUMBERS with Claw
 bun run seed             # one household + a starting fridge; roommates join from the group chat
 bun run seed --demo      # fictional roommates (Alex, Sam, Jordan) for the terminal chat
-bun run chat             # talk to Thyme in the terminal (/as <name>, /group, /dm); sends no real messages
+bun run chat             # talk to Thyme in the terminal (/as <name>, /group, /dm, /photo <path>); sends no real messages
 bun start                # run Thyme on Claw Messenger (real iMessage)
-bun test                 # 134 tests
+bun test                 # 152 tests
 bun run typecheck
 ```
 
@@ -140,6 +144,7 @@ src/domain/              money, splits, expenses, household, foodkeeper, phone, 
 src/privacy/projection.ts  who can see what
 src/inbox.ts             dedupe, debounce, per-chat ordering
 src/outbox.ts            quiet hours, caps, budget, retries, delivery tracking
+src/receipts/            receipt photos: download, Gemini vision + Zod, sum check, who paid / whose items
 src/router.ts            members, group rules, names, replies
 src/db/                  SQLite schema and migrations
 src/clock.ts             the only source of time (fake clock for demos)
@@ -161,7 +166,8 @@ data/foodkeeper.json     USDA FoodKeeper data
 
 ## Known limitations
 
-- Receipt photos arrive but aren't read yet (Phase 6).
+- Receipt photos need `LLM=on`, and Claw must deliver downloadable attachments (check with `bun run spike`).
+- `/photo <path>` in the terminal chat doesn't support paths with spaces.
 - Waste costs use the price someone gave, or an estimate from `data/prices.json` when they didn't.
 - Pounds and CO2 are per-category estimates, not weighed amounts.
 - Group chats need both roommates' numbers registered with Claw first (`bun run register-phones`).

@@ -2,9 +2,12 @@
 // Type a message to send it as the current roommate. Commands:
 //   /as <name>   switch who you are       /group   talk in the household group
 //   /dm          talk in your own DM      /who     show who and where you are
+//   /photo <path> [caption]   send a local image as a photo (e.g. a receipt)
 // This is the only place message text is printed, because it's the chat UI itself.
 
 import type { Adapter, Destination, InboundMessage, SendOptions, SendResult, TextPart } from "./types";
+import { homedir } from "node:os";
+import { resolve } from "node:path";
 import { now } from "../clock";
 
 export interface TerminalMember {
@@ -34,7 +37,7 @@ export class TerminalAdapter implements Adapter {
   }
 
   private prompt() {
-    this.out(`(${this.current.name} in ${this.where()}) type a message, or /as <name>, /group, /dm, /who`);
+    this.out(`(${this.current.name} in ${this.where()}) type a message, or /as <name>, /group, /dm, /who, /photo <path>`);
   }
 
   async start(handlers: { onMessage: (m: InboundMessage) => void }): Promise<void> {
@@ -62,13 +65,22 @@ export class TerminalAdapter implements Adapter {
           this.prompt();
           continue;
         }
+        let text = line;
+        let attachments: InboundMessage["attachments"] = [];
+        if (line.startsWith("/photo ")) {
+          // "/photo ~/Desktop/receipt.jpg Sam paid": path, then an optional caption.
+          const [rawPath = "", ...caption] = line.slice(7).trim().split(/\s+/);
+          const path = resolve(rawPath.replace(/^~(?=\/|$)/, homedir()));
+          attachments = [{ url: `file://${path}` }];
+          text = caption.join(" ");
+        }
         this.counter++;
         handlers.onMessage({
           messageId: `term-${now().getTime()}-${this.counter}`,
           chatId: this.inGroup ? this.groupChatId : `term-dm-${this.current.phone}`,
           from: this.current.phone,
-          text: line,
-          attachments: [],
+          text,
+          attachments,
           isGroup: this.inGroup,
           participants: this.members.map((m) => m.phone),
           sentAt: now().toISOString(),

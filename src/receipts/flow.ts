@@ -1,0 +1,267 @@
+// The receipt conversation: show what was read, let people say who paid and whose items are whose,
+// and only save after a "yes". The reply is parsed in code, so it works with the LLM off too.
+//
+//   photo           -> "Got your receipt: 1. spinach $3.99 ... Reply yes to save, or tell me changes"
+//   "Sam paid"      -> buyer is Sam (also works as a caption on the photo)
+//   "2 is mine"     -> item 2 is the sender's; "3 and 4 are Jordan's"; "2 is shared" undoes it
+//   "total is $X"   -> use a corrected total when the numbers don't add up
+//   "yes"           -> record the expense (source receipt) and add the food to the fridge
+//   "cancel"        -> drop it
+
+import type { Database } from "bun:sqlite";
+import { now } from "../clock";
+import { DuplicateExpenseError, recordExpense } from "../domain/expenses";
+import { memberByName, type Member } from "../domain/household";
+import { addItem } from "../domain/inventory";
+import { formatCents, parseCents } from "../domain/money";
+import { allocate, type CheckedReceipt, type ReceiptLine } from "./receipt";
+
+export const RECEIPT_TTL_MS = 60 * 60 * 1000;
+
+/** Lines that belong in the bill but not in the fridge. */
+const NOT_FOOD = /\b(bag|bags|fee|deposit|crv|tip|donation|gift|coupon|service|paper towels?|toilet paper|detergent|soap|shampoo|toothpaste|batter(y|ies)|foil|napkins?|sponges?|trash)\b/i;
+
+export interface PendingReceipt {
+  store: string | null;
+  items: ReceiptLine[];
+  taxCents: number;
+  discountCents: number;
+  totalCents: number;
+  balanced: boolean;
+  diffCents: number;
+  unreadable: number;
+  buyerId: number;
+  senderId: number;
+  at: string;
+}
+
+const key = (memberId: number) => `receipt:${memberId}`;
+
+export function getPendingReceipt(db: Database, memberId: number): PendingReceipt | null {
+  const row = db.query<{ value: string }, [string]>("SELECT value FROM state WHERE key = ?").get(key(memberId));
+  if (!row) return null;
+  const p = JSON.parse(row.value) as PendingReceipt;
+  if (Date.parse(p.at) + RECEIPT_TTL_MS < now().getTime()) {
+    clearPendingReceipt(db, memberId);
+    return null;
+  }
+  return p;
+}
+
+/** Saves only items, amounts, and member ids: never the image, its URL, or payment details. */
+export function savePendingReceipt(db: Database, p: PendingReceipt): void {
+  db.run("INSERT INTO state (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value", [key(p.senderId), JSON.stringify(p)]);
+}
+
+export function clearPendingReceipt(db: Database, memberId: number): void {
+  db.run("DELETE FROM state WHERE key = ?", [key(memberId)]);
+}
+
+export function pendingFromCheck(r: CheckedReceipt, senderId: number, buyerId = senderId): PendingReceipt {
+  return {
+    store: r.store,
+    items: r.items,
+    taxCents: r.taxCents,
+    discountCents: r.discountCents,
+    totalCents: r.totalCents,
+    balanced: r.balanced,
+    diffCents: r.diffCents,
+    unreadable: r.unreadable,
+    buyerId,
+    senderId,
+    at: now().toISOString(),
+  };
+}
+
+// ---- Parsing replies ----
+
+export interface ReceiptReply {
+  confirm: boolean;
+  cancel: boolean;
+  /** "second trip" / "again": the user says it isn't a duplicate. */
+  notDuplicate: boolean;
+  buyerId?: number;
+  assign: { index: number; ownerId: number | null }[];
+  totalCents?: number;
+  error?: string;
+}
+
+const NUM = String.raw`\d{1,2}`;
+const NUM_LIST = String.raw`(?:#?${NUM}(?:\s*(?:,|and|&|\+)\s*#?${NUM})*)`;
+
+function resolve(members: Member[], senderId: number, who: string): number | null {
+  const w = who.trim().toLowerCase().replace(/'s$/, "");
+  if (["i", "me", "mine", "my", "myself"].includes(w)) return senderId;
+  return memberByName(members, w)?.id ?? null;
+}
+
+/** Parse a reply to a pending receipt. Null when the message isn't about the receipt. */
+export function parseReceiptReply(raw: string, members: Member[], senderId: number): ReceiptReply | null {
+  const text = raw.trim().replace(/[.!]+$/, "");
+  const t = text.toLowerCase();
+  const out: ReceiptReply = { confirm: false, cancel: false, notDuplicate: false, assign: [] };
+  let matched = false;
+
+  if (/^(cancel|no|nope|nevermind|never mind|discard|drop it|forget it|scrap that)\b/.test(t)) return { ...out, cancel: true };
+  if (/^(yes|yep|yeah|yup|y|ok|okay|confirm|looks good|looks right|correct|save( it)?|sure|perfect|lgtm)\b/.test(t)) {
+    out.confirm = true;
+    matched = true;
+  }
+  if (/\b(second (trip|purchase|time)|again|another (trip|one)|not a duplicate)\b/.test(t)) {
+    out.notDuplicate = true;
+    matched = true;
+  }
+
+  const buyer = text.match(/\b(?:paid by|bought by)\s+([a-z]+)/i) ?? text.match(/\b([a-z]+)\s+(?:paid|bought (?:it|this|these|them|the groceries|everything))\b/i);
+  if (buyer) {
+    const id = resolve(members, senderId, buyer[1]!);
+    if (id === null) return { ...out, error: `I don't know who "${buyer[1]}" is. Roommates: ${members.map((m) => m.name).join(", ")}` };
+    out.buyerId = id;
+    matched = true;
+  }
+
+  const assignRe = new RegExp(String.raw`(?:items?\s+)?(${NUM_LIST})\s+(?:is|are|was|were|=|goes to|go to|for)\s+(?:just\s+|only\s+|all\s+)?(mine|me|shared|everyone'?s?|for everyone|(?:for\s+)?[a-z]+(?:'s)?)\b`, "gi");
+  for (const m of text.matchAll(assignRe)) {
+    const who = m[2]!.replace(/^for\s+/i, "");
+    const shared = /^(shared|everyone'?s?|for everyone)$/i.test(m[2]!);
+    const ownerId = shared ? null : resolve(members, senderId, who);
+    if (!shared && ownerId === null) return { ...out, error: `I don't know who "${who.replace(/'s$/, "")}" is. Roommates: ${members.map((x) => x.name).join(", ")}` };
+    for (const n of m[1]!.match(/\d+/g) ?? []) out.assign.push({ index: Number(n), ownerId });
+    matched = true;
+  }
+
+  const total = t.match(/\btotal\s+(?:is|was|=|should be)?\s*(\$?\s?\d[\d,]*(?:\.\d{1,2})?)/);
+  if (total) {
+    const cents = parseCents(total[1]!);
+    if (cents) {
+      out.totalCents = cents;
+      matched = true;
+    }
+  }
+  return matched ? out : null;
+}
+
+// ---- Wording ----
+
+export function receiptSummary(p: PendingReceipt, members: Member[]): string {
+  const name = (id: number) => members.find((m) => m.id === id)?.name ?? "someone";
+  const lines = [`Got ${p.store ? `the ${p.store}` : "your"} receipt:`];
+  p.items.forEach((it, i) => lines.push(`${i + 1}. ${it.name} ${formatCents(it.cents)}${it.ownerId !== null ? ` (just ${name(it.ownerId)}'s)` : ""}`));
+  const extras = [
+    ...(p.discountCents ? [`savings -${formatCents(p.discountCents)}`] : []),
+    ...(p.taxCents ? [`tax ${formatCents(p.taxCents)}`] : []),
+    `total ${formatCents(p.totalCents)}`,
+  ];
+  lines.push(extras.join(", ") + ".");
+  if (!p.balanced) {
+    const computed = p.totalCents + p.diffCents;
+    lines.push(`Heads up: the lines add up to ${formatCents(computed)}, but the total says ${formatCents(p.totalCents)}. Reply "total is $X" to fix it, or "yes" to use ${formatCents(p.totalCents)}.`);
+  }
+  if (p.unreadable) lines.push(`I couldn't read ${p.unreadable} line${p.unreadable === 1 ? "" : "s"}. Is anything missing? You can say "total is $X".`);
+  lines.push(`Paid by ${name(p.buyerId)}. Everything is split evenly unless you say otherwise.`);
+  lines.push(`Reply "yes" to save, or tell me changes like "Sam paid" or "2 is mine". "cancel" to drop it.`);
+  return lines.join("\n");
+}
+
+// ---- Applying a reply ----
+
+export interface ReceiptContext {
+  db: Database;
+  householdId: number;
+  tz: string;
+  members: Member[];
+  member: Member;
+  messageId?: string;
+}
+
+/** Handle a reply to the sender's pending receipt. Returns the reply text, or null if not about the receipt. */
+export function handleReceiptReply(ctx: ReceiptContext, text: string): string | null {
+  const p = getPendingReceipt(ctx.db, ctx.member.id);
+  if (!p) return null;
+  const r = parseReceiptReply(text, ctx.members, ctx.member.id);
+  if (!r) return null;
+  if (r.error) return r.error;
+  if (r.cancel) {
+    clearPendingReceipt(ctx.db, ctx.member.id);
+    return "Okay, I dropped that receipt. Nothing was saved.";
+  }
+
+  const bad = r.assign.filter((a) => a.index < 1 || a.index > p.items.length).map((a) => a.index);
+  if (bad.length) return `The receipt only has items 1 to ${p.items.length}. Which did you mean?`;
+  for (const a of r.assign) p.items[a.index - 1]!.ownerId = a.ownerId;
+  if (r.buyerId !== undefined) p.buyerId = r.buyerId;
+  if (r.totalCents !== undefined) {
+    const computed = p.totalCents + p.diffCents;
+    p.totalCents = r.totalCents;
+    p.diffCents = computed - r.totalCents;
+    p.balanced = true; // the user set the total
+    p.unreadable = 0;
+  }
+  p.at = now().toISOString();
+  savePendingReceipt(ctx.db, p);
+
+  if (!r.confirm && !r.notDuplicate) return receiptSummary(p, ctx.members);
+  return commitReceipt(ctx, p, r.notDuplicate);
+}
+
+function commitReceipt(ctx: ReceiptContext, p: PendingReceipt, allowDuplicate: boolean): string {
+  const name = (id: number) => ctx.members.find((m) => m.id === id)?.name ?? "someone";
+  if (p.totalCents <= 0) return `I couldn't read a total. Reply "total is $X" with the amount you paid.`;
+  const memberIds = ctx.members.map((m) => m.id);
+  if (!memberIds.includes(p.buyerId)) memberIds.push(p.buyerId);
+
+  let expense;
+  try {
+    expense = recordExpense(ctx.db, {
+      householdId: ctx.householdId,
+      tz: ctx.tz,
+      spec: { totalCents: p.totalCents, buyerId: p.buyerId, memberIds, allocations: allocate(p.items, p.totalCents) },
+      description: p.store ? `${p.store} receipt` : "receipt",
+      source: "receipt",
+      sourceMessageId: ctx.messageId,
+      allowDuplicate,
+    });
+  } catch (error) {
+    if (error instanceof DuplicateExpenseError) {
+      return `${name(p.buyerId)} already logged ${formatCents(p.totalCents)} today. Is this a second trip? Reply "yes, second trip" to save it anyway, or "cancel".`;
+    }
+    return `I couldn't split that: ${(error as Error).message}. Try "total is $X" or "cancel".`;
+  }
+  clearPendingReceipt(ctx.db, ctx.member.id);
+
+  let added = 0;
+  const skipped: string[] = [];
+  for (const it of p.items) {
+    if (NOT_FOOD.test(it.name)) {
+      skipped.push(it.name);
+      continue;
+    }
+    const r = addItem(ctx.db, {
+      householdId: ctx.householdId,
+      name: it.name,
+      buyerId: p.buyerId,
+      ownerId: it.ownerId,
+      state: "raw",
+      priceCents: it.cents,
+      costSource: "receipt",
+    });
+    if (r.ok) added++;
+    else skipped.push(it.name);
+  }
+
+  const payer = name(expense.buyerId);
+  const owes = expense.shares
+    .filter((s) => s.memberId !== expense.buyerId && s.cents > 0)
+    .map((s) => `${name(s.memberId)} owes ${payer} ${formatCents(s.cents)}`);
+  const payerShare = expense.shares.find((s) => s.memberId === expense.buyerId)?.cents ?? 0;
+  return [
+    `Saved: ${formatCents(expense.totalCents)} paid by ${payer}.`,
+    ...owes,
+    `${payer}'s own share is ${formatCents(payerShare)} (already paid).`,
+    added ? `Added ${added} item${added === 1 ? "" : "s"} to the fridge list with their receipt prices.` : "",
+    skipped.length ? `Not added to the fridge (not food): ${skipped.join(", ")}.` : "",
+    `Reply "undo" to remove the expense.`,
+  ]
+    .filter(Boolean)
+    .join("\n");
+}

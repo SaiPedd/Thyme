@@ -36,6 +36,8 @@ export interface AddItemInput {
   storage?: Storage;
   state?: "raw" | "cooked";
   priceCents?: number | null;
+  /** Where a given price came from (default "user"). */
+  costSource?: "receipt" | "user";
 }
 
 export type AddItemResult =
@@ -71,7 +73,7 @@ export function addItem(db: Database, input: AddItemInput): AddItemResult {
       input.ownerId,
       input.buyerId,
       cost,
-      cost === null ? null : input.priceCents != null ? "user" : "estimate",
+      cost === null ? null : input.priceCents != null ? (input.costSource ?? "user") : "estimate",
       at.toISOString(),
       expires?.toISOString() ?? null,
     )!;

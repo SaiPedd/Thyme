@@ -108,6 +108,11 @@ household totals only.
 - Test: `bun test`
 
 ### Phase 6: P1b receipt photo (T+3:00 to 3:30), stretch; only if the spike shows attachments work
+**Status: BUILT (branch phase-6-receipts).** src/receipts/: download (Bearer retry, 10 MB cap, bytes never
+stored), Gemini vision with a JSON schema, Zod validation, sum check within 1 cent, payment lines and 4+ digit
+runs dropped. The list is shown first; replies parsed in code: "yes", "Sam paid" (buyer), "2 is mine" /
+"3 is Jordan's" (kept items carry their share of tax), "total is $X", "cancel". On yes: expense (source receipt)
+plus fridge items with receipt prices; non-food lines (bag fee) stay out of the fridge. Terminal: /photo <path>.
 - Download inside the handler immediately (never log the URL), send to Gemini (image input), and validate
   the result with a Zod schema (items, prices, tax, discounts, total, store, date).
 - Code checks items + tax - discounts = total within 1 cent; otherwise it flags the mismatch.
