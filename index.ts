@@ -53,6 +53,8 @@ const router = makeRouter({
   client: makeClient({ llm: config.llm, apiKey: config.geminiApiKey }),
   mealdb: config.mealdb ? makeMealDbClient(config.mealdbApiKey) : null,
   devGroupChatId,
+  // Receipt photos: the Claw key is only sent if a plain download is refused; file:// is terminal-only.
+  receipts: { apiKey: config.clawApiKey, allowFile: useTerminal },
 });
 const inbox = new Inbox(db, router, {
   debounceMs: useTerminal ? 300 : 2000,

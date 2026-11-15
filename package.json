@@ -21,6 +21,7 @@
     "@types/bun": "latest"
   },
   "dependencies": {
-    "@google/genai": "^2.3.0"
+    "@google/genai": "^2.3.0",
+    "zod": "^4.6.7"
   }
 }

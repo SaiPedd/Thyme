@@ -30,6 +30,7 @@ import {
   isPast,
   itemNote,
   matchItem,
+  nameWords,
   recentlyChanged,
   setItemPrice,
   setItemStatus,
@@ -54,6 +55,9 @@ export interface ToolContext {
   sentAt?: string;
   /** Extra messages to send after the reply (e.g. a private balance DM). */
   drafts: Draft[];
+  /** The new message plus the sender's own recent messages. When set, record_expense only accepts
+   *  roommates named there, so the model can't carry people over from someone else's message. */
+  mentionText?: string;
   /** TheMealDB client for recipe ideas; absent or null = built-in recipes only. */
   mealdb?: MealDbClient | null;
   /** What the sender wrote, so tools can check a value really came from them (e.g. a payment handle). */
@@ -102,6 +106,25 @@ function resolveMany(ctx: ToolContext, names: string[] | undefined, fallback: nu
   return ids;
 }
 
+/** The first name the sender never mentioned (in this message or their own recent ones), or null.
+ *  A list naming the whole household is "everyone" and always fine. */
+function unmentioned(ctx: ToolContext, lists: string[][]): string | null {
+  if (ctx.mentionText === undefined) return null;
+  const said = ctx.mentionText.toLowerCase();
+  const word = (w: string) => new RegExp(String.raw`(^|[^a-z])${w.replace(/[^a-z0-9]/g, "")}`).test(said);
+  const wholeHouse = (list: string[]) => {
+    const ids = new Set(list.map((n) => resolveMember(ctx, n)));
+    return ctx.members.every((m) => ids.has(m.id));
+  };
+  for (const n of lists.filter((l) => !wholeHouse(l)).flat()) {
+    const id = resolveMember(ctx, n);
+    if (id === null || id === ctx.member.id) continue;
+    const name = nameOf(ctx, id).toLowerCase();
+    if (!word(name.split(/\s+/)[0]!) && !word(n.trim().toLowerCase())) return nameOf(ctx, id);
+  }
+  return null;
+}
+
 /**
  * An expense line item ("chicken thighs ($9)") is what the buyer paid for that food, so it becomes
  * the price of the matching fridge item: fresh, visible to the buyer, and not priced yet.
@@ -125,7 +148,8 @@ const recordExpenseTool: ToolDef = {
   description:
     "Record a grocery or household expense and split it. Use when someone says what they spent. " +
     "Pass amounts exactly as the user wrote them (e.g. \"$48.60\"). Code computes every share; never compute shares yourself. " +
-    "If the user says some items are just theirs or just some people's, list those as items. If someone owes a fixed amount, use fixed.",
+    "If the user says some items are just theirs or just some people's, list those as items. If someone owes a fixed amount, use fixed. " +
+    "\"me\" always means the sender of the new message. Only include people named in the new message; never carry people over from earlier messages.",
   input_schema: {
     type: "object",
     properties: {
@@ -140,7 +164,7 @@ const recordExpenseTool: ToolDef = {
           properties: {
             description: { type: "string" },
             amount: { type: "string", description: "As written, e.g. \"$9\"" },
-            members: { type: "array", items: { type: "string" }, description: "Who it's for: \"me\" or names" },
+            members: { type: "array", items: { type: "string" }, description: "Who it's for: \"me\" (the sender of the new message) or names from the new message" },
           },
           required: ["description", "amount", "members"],
           additionalProperties: false,
@@ -165,6 +189,20 @@ const recordExpenseTool: ToolDef = {
   run(input, ctx) {
     const total = parseCents(String(input.total));
     if (!total) return { error: "couldn't read the total amount. Ask the user for it." };
+    const named: string[][] = [
+      ...(input.buyer ? [[String(input.buyer)]] : []),
+      (input.split_among ?? []) as string[],
+      ...((input.items ?? []) as { members?: string[] }[]).map((it) => it.members ?? []),
+      ...((input.fixed ?? []) as { member: string }[]).map((f) => [f.member]),
+    ];
+    const stray = unmentioned(ctx, named);
+    if (stray) {
+      return {
+        error: `${ctx.member.name} sent this message and didn't mention ${stray}, so ${stray} can't be on it. ` +
+          `Where the sender said "me" or "mine", pass "me" (that's ${ctx.member.name}, not ${stray}). For the whole household, leave split_among out. ` +
+          "Call record_expense again with those people now; only ask the user if you still can't tell who they meant.",
+      };
+    }
     const buyerId = input.buyer ? resolveMember(ctx, String(input.buyer)) : ctx.member.id;
     if (buyerId === null) return { error: `unknown buyer "${input.buyer}"` };
     const among = resolveMany(ctx, input.split_among, ctx.members.map((m) => m.id));
@@ -197,6 +235,7 @@ const recordExpenseTool: ToolDef = {
         description: input.description,
         sourceMessageId: ctx.messageId,
         allowDuplicate: input.confirm_duplicate === true,
+        loggedById: ctx.member.id,
       });
       const payer = nameOf(ctx, e.buyerId);
       const payerShare = e.shares.find((s) => s.memberId === e.buyerId)?.cents ?? 0;
@@ -228,11 +267,16 @@ const recordExpenseTool: ToolDef = {
 
 const undoTool: ToolDef = {
   name: "undo_last",
-  description: "Undo the most recent expense the sender logged. Use when they say undo, scratch that, or it was wrong.",
+  description: "Undo the most recent expense the sender logged (including a receipt someone else paid for). Use when they say undo, scratch that, or it was wrong.",
   input_schema: { type: "object", properties: {}, additionalProperties: false },
   run(_input, ctx) {
     const undone = undoLastExpense(ctx.db, ctx.household.id, ctx.member.id);
-    return undone ? { undone: true, total: formatCents(undone.totalCents) } : { undone: false, note: "nothing to undo" };
+    if (!undone) return { undone: false, note: "nothing to undo" };
+    return {
+      undone: true,
+      total: formatCents(undone.totalCents),
+      ...(undone.itemsRemoved.length ? { removed_from_fridge: undone.itemsRemoved } : {}),
+    };
   },
 };
 
@@ -851,7 +895,10 @@ const checkItemTool: ToolDef = {
     additionalProperties: false,
   },
   run(input, ctx) {
-    const item = findItem(ctx.db, ctx.household.id, ctx.member.id, String(input.item ?? ""), { sharedOnly: ctx.isGroup });
+    const phrase = String(input.item ?? "");
+    const found = findItem(ctx.db, ctx.household.id, ctx.member.id, phrase, { sharedOnly: ctx.isGroup });
+    // Only answer from inventory when every word matches: "cooked rice" is not the dry rice in the pantry.
+    const item = found && nameWords(phrase).every((w) => nameWords(found.name).includes(w)) ? found : null;
     if (item) {
       const past = isPast(item);
       return {

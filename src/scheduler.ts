@@ -47,7 +47,7 @@ export function groupReminderText(items: Item[], tz: string, retry: boolean): st
   }
   if (past.length) {
     const one = past.length === 1 && !isPlural(past[0]!.name);
-    lines.push(`${list(past.map((i) => `The ${i.name}`))} ${one ? "is" : "are"} past the USDA FoodKeeper date. To be safe, toss ${one ? "it" : "them"} and tell me "tossed the ${past[0]!.name}".`);
+    lines.push(`The ${list(past.map((i, n) => (n === 0 ? i.name : `the ${i.name}`)))} ${one ? "is" : "are"} past the USDA FoodKeeper date. To be safe, toss ${one ? "it" : "them"} and tell me "tossed the ${past[0]!.name}".`);
   }
   return lines.join("\n");
 }

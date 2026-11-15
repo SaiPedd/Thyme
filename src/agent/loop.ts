@@ -73,14 +73,6 @@ export function durationsAreGrounded(reply: string, sources: string[]): boolean 
   return true;
 }
 
-/** Intents answered by code, never by the model's wording. */
-const FACT_QUESTIONS = new Set(["inventory", "balances", "waste"]);
-
-/** "I sent your balance to your DMs", "I DM'd you": only true if a private message was actually queued. */
-export function claimsPrivateSend(reply: string): boolean {
-  return /\b(sent|send|texted|messaged)\b[^.!?\n]*\b(DMs?|privately|private message)\b|\bDM'?d (you|them)\b/i.test(reply);
-}
-
 /**
  * If the reply uses a TheMealDB recipe, make sure the link and the credit are in it (code, not the model,
  * guarantees attribution and that they can open the full recipe).
@@ -105,11 +97,19 @@ export function withRecipeCredit(reply: string, toolResults: { name: string; res
   return extra.length ? `${reply}\n${extra.join("\n")}` : reply;
 }
 
+/** Intents answered by code, never by the model's wording. */
+const FACT_QUESTIONS = new Set(["inventory", "balances", "waste"]);
+
+/** "I sent your balance to your DMs", "I DM'd you": only true if a private message was actually queued. */
+export function claimsPrivateSend(reply: string): boolean {
+  return /\b(sent|send|texted|messaged)\b[^.!?\n]*\b(DMs?|privately|private message)\b|\bDM'?d (you|them)\b/i.test(reply);
+}
+
 /** Recent chat as plain text, so we never replay old model turns in an undocumented format. */
 function renderHistory(history: HistoryTurn[], botName: string): string {
   if (history.length === 0) return "";
   const lines = history.map((h) => (h.role === "assistant" ? `${botName}: ${h.content}` : h.content));
-  return `Recent conversation (oldest first):\n${lines.join("\n")}\n\n`;
+  return `Recent conversation (oldest first, background only; act only on the new message below):\n${lines.join("\n")}\n\n`;
 }
 
 export async function runAgent(input: AgentInput): Promise<AgentResult> {
@@ -132,6 +132,12 @@ export async function runAgent(input: AgentInput): Promise<AgentResult> {
   const intent = parseIntent(text, botName);
   if (intent && FACT_QUESTIONS.has(intent.kind)) return fallback("fact question");
 
+  // Names the sender actually used: the new message plus their own recent messages (not other people's).
+  const own = input.history
+    .filter((h) => h.role === "user" && (!ctx.isGroup || h.content.startsWith(`${ctx.member.name}: `)))
+    .map((h) => h.content);
+  const toolCtx: ToolContext = { ...ctx, mentionText: [text, ...own].join("\n") };
+
   const timeoutMs = input.timeoutMs ?? AGENT_TIMEOUT_MS;
   const started = performance.now();
   const context = turnContext({
@@ -141,7 +147,7 @@ export async function runAgent(input: AgentInput): Promise<AgentResult> {
     localDate: input.localDate,
   });
   const steps: Record<string, unknown>[] = [
-    { type: "user_input", content: [{ type: "text", text: `${renderHistory(input.history, botName)}${context}\n${text}` }] },
+    { type: "user_input", content: [{ type: "text", text: `${renderHistory(input.history, botName)}${context}\nNew message:\n${ctx.member.name}: ${text}` }] },
   ];
   const tools = toolDefinitions();
 
@@ -199,7 +205,7 @@ export async function runAgent(input: AgentInput): Promise<AgentResult> {
         let payload: Record<string, unknown>;
         let isError = false;
         try {
-          payload = await runToolAsync(String(call.name), call.arguments ?? {}, ctx);
+          payload = await runToolAsync(String(call.name), call.arguments ?? {}, toolCtx);
           toolResults.push({ name: String(call.name), result: payload });
         } catch (error) {
           payload = { error: (error as Error).message };

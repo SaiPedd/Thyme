@@ -127,6 +127,9 @@ paid ("got spinach for $4", or an expense line item like "chicken thighs ($9)");
 - Test: `bun test` and `bun run time-travel +2d`
 
 ### Phase 4: P3 kitchen companion (T+2:00 to 2:45)
+**Status: DONE.** suggest_recipe (built-in recipes from inventory only, preferring food about to expire;
+model ideas validated in code), save/get preferences honored for everyone eating, cooked_recipe with
+confirmation, check_item, forget_me, and fallback rules for all of them.
 - Tools: suggest_recipe, save_preference, get_preferences, get_household_summary.
 - Recipes use only current inventory (plus salt and oil). Code checks every ingredient and flags
   what's missing, honoring dislikes and diets. "I cooked it" updates the inventory after confirmation.
@@ -170,6 +173,13 @@ split in a grocery bill, so charging again for a toss would double-charge. CO2 a
 - Test: `bun test` (test/ledger.test.ts)
 
 ### Phase 6: P1b receipt photo (T+3:00 to 3:30), stretch; only if the spike shows attachments work
+**Status: BUILT (branch phase-6-receipts).** src/receipts/: download (Bearer retry, bytes never
+stored), Gemini vision with a JSON schema, Zod validation, sum check within 1 cent, payment lines and 4+ digit
+runs dropped. The list is shown first; replies parsed in code: "yes", "Sam paid" (buyer), "2 is mine" /
+"3 is Jordan's" (kept items carry their share of tax), "total is $X", "cancel". On yes: expense (source receipt)
+plus fridge items with receipt prices; non-food lines (bag fee) stay out of the fridge. Also "split with Sam only",
+"5 is me and Sam's", blurry lines filled from the total ("4 was bananas"), and whoever sent it can undo it.
+Terminal: /photo <path>.
 - Download inside the handler immediately (never log the URL), send to Gemini (image input), and validate
   the result with a Zod schema (items, prices, tax, discounts, total, store, date).
 - Code checks items + tax - discounts = total within 1 cent; otherwise it flags the mismatch.

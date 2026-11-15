@@ -15,9 +15,9 @@ Full build plan: [PLAN.md](PLAN.md).
 | 1 | Bun WebSocket integration, Gemini Interactions loop, privacy and outbox | Done |
 | 2 | Expense splitting: split summary, recording expenses, undo, balances | Done |
 | 3 | Inventory and expiry tracking, reminders, claims on expiring food | Done |
-| 4 | Kitchen companion: recipes from what's in the fridge, saved preferences | Done (recipe data being replaced with real data) |
+| 4 | Kitchen companion: recipes from what's in the fridge (built-in + TheMealDB), saved preferences | Done |
 | 5 | Waste ledger: tosses and rescues, tracked (never charged to balances) | Done |
-| 6 | Receipt photos (stretch) | Planned |
+| 6 | Receipt photos (stretch) | Built, needs a phone test |
 | 7 | Demo polish, eval script | Planned |
 
 ## What works today
@@ -48,11 +48,20 @@ Thyme:  Cooked rice lasts 4-6 days in the fridge according to the USDA FoodKeepe
 - **Expense splitting:** equal, per item ("the chicken is just mine"), between some roommates ("the milk
   is me and Sam"), or fixed amounts ("Sam owes 8"). Also undo, duplicate detection, and balances
   that net out across everything.
+- **Receipt photos:** send a photo of a grocery receipt. Thyme reads the items, tax, and total, checks that
+  they add up, and shows the list. Reply "Sam paid" if someone else bought it, "2 is mine", "3 and 4 are
+  Jordan's", or "5 is me and Sam's" for items that aren't for everyone, "split with Sam only" or "split between
+  me and Jordan" if not the whole house is in on it, then "yes". Whoever sent the receipt can "undo" it. It splits the bill (each kept item carries its share of tax)
+  and adds the food to the fridge list with the real prices. Nothing is saved before "yes", and the photo is never stored.
 - **Roommates and names:** whoever is in the household group becomes a roommate. Thyme asks each person
   their name once and welcomes anyone added later.
 - **Getting its attention:** say "Thyme" (or an alias from `BOT_ALIASES`) anywhere in a message. In the group
   it also answers questions and clear food or expense logs. Other chatter is kept as context, and Thyme stays quiet.
 - **Shelf life:** answers come from the USDA FoodKeeper table (661 foods), never from the model's memory.
+- **Fridge tracking:** "got spinach and milk" logs food with a USDA expiry date. Thyme reminds the group at
+  9 AM about shared food expiring within 48 hours (personal food goes to the owner's DM), and "mine" claims it.
+- **Kitchen companion:** "what can I make?" suggests a recipe that only uses what's in the fridge, favoring food
+  about to expire and honoring saved diets, dislikes, and allergies.
 - **How to pay back:** "pay me through Zelle at dharaniDevadiga" or "my Venmo is @dharani" saves how you want
   to be paid (Zelle, Venmo, Cash App, PayPal, Apple Cash; several allowed). "What do I owe?" then shows it next
   to each amount: "you owe Dharani $13.20 (pay with Zelle: dharaniDevadiga)". Handles are saved exactly as typed,
@@ -125,9 +134,9 @@ bun run register-phones  # register CLAW_TEST_NUMBERS with Claw
 bun run seed             # reset: one household, empty kitchen; roommates join from the group chat
 bun run seed --demo      # fictional roommates (Alex, Sam, Jordan) and a starter fridge for the terminal chat
 bun run mealdb-warm      # pre-cache TheMealDB recipes for what's in the kitchen (run before a demo)
-bun run chat             # talk to Thyme in the terminal (/as <name>, /group, /dm); sends no real messages
+bun run chat             # talk to Thyme in the terminal (/as <name>, /group, /dm, /photo <path>); sends no real messages
 bun start                # run Thyme on Claw Messenger (real iMessage)
-bun test                 # 168 tests
+bun test                 # all tests
 bun run typecheck
 ```
 
@@ -139,14 +148,17 @@ To try it without phones, run `bun run seed --demo` and then `bun run chat`.
 index.ts                 entry point (Claw or terminal adapter)
 src/adapters/            claw.ts (WebSocket), terminal.ts (dev), types.ts (one interface for both)
 src/agent/               loop.ts (Gemini function calling), tools.ts, prompt.ts, fallback.ts, triggers.ts
-src/domain/              money, splits, expenses, household, foodkeeper, phone
+src/domain/              money, splits, expenses, household, foodkeeper, phone, inventory, claims,
+                         recipes, prefs, prices, waste (ledger), impact (pounds and CO2)
 src/privacy/projection.ts  who can see what
 src/inbox.ts             dedupe, debounce, per-chat ordering
 src/outbox.ts            caps, budget, retries, delivery tracking
+src/receipts/            receipt photos: download, Gemini vision + Zod, sum check, who paid / whose items
 src/router.ts            members, group rules, names, replies
 src/db/                  SQLite schema and migrations
 src/clock.ts             the only source of time (fake clock for demos)
-scripts/                 spike, register-phones, seed, load-foodkeeper
+src/scheduler.ts         9 AM expiry reminders (one retry), clock offset for time travel
+scripts/                 spike, register-phones, seed, load-foodkeeper, time-travel
 test/                    bun test suites
 data/foodkeeper.json     USDA FoodKeeper data
 ```
@@ -165,7 +177,8 @@ data/foodkeeper.json     USDA FoodKeeper data
 
 ## Known limitations
 
-- Receipt photos arrive but aren't read yet (Phase 6).
+- Receipt photos need `LLM=on`, and Claw must deliver downloadable attachments (check with `bun run spike`).
+- `/photo <path>` in the terminal chat doesn't support paths with spaces.
 - Waste totals are in dollars and item counts only; CO2 and weight are cut until there's a real, cited dataset.
 - Undoing an expense doesn't clear item prices that its line items set.
 - Group chats need both roommates' numbers registered with Claw first (`bun run register-phones`).

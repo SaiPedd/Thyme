@@ -45,6 +45,9 @@ if (household) {
   const past = atRisk.filter((i) => isPast(i, at)).length;
   console.log(`[time-travel] ${atRisk.length} item(s) expiring within 48h (${past} already past the USDA date)`);
 }
+if (household && household.mode === "group" && !household.chat_id) {
+  console.log('[time-travel] warning: no household group chat yet, so group reminders have nowhere to go. Message the group first (e.g. "Thyme hi").');
+}
 console.log(
   hour >= DAILY_HOUR
     ? "[time-travel] a running agent will send today's reminders within 5 seconds (if it hasn't already today)"

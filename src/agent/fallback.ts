@@ -138,7 +138,10 @@ export function parseIntent(raw: string, botName = ""): Intent | null {
 export function describeToolResult(name: string, r: Record<string, any>): string | null {
   switch (name) {
     case "undo_last":
-      return r.undone ? `Undone: the ${r.total} expense is removed.` : "There's nothing of yours to undo.";
+      if (!r.undone) return "There's nothing of yours to undo.";
+      if (r.kind === "toss") return `Undone: the ${r.item} is back in the fridge list.`;
+      const removed = (r.removed_from_fridge as string[] | undefined) ?? [];
+      return `Undone: the ${r.total} expense is removed.${removed.length ? ` Also took ${removed.join(", ")} off the fridge list.` : ""}`;
     case "get_balances":
       if (r.sent_privately) return "I sent your balance to you privately.";
       return [`Your balance: ${r.net}.`, ...((r.breakdown as string[]) ?? [])].join("\n");
@@ -201,7 +204,10 @@ export function describeToolResult(name: string, r: Record<string, any>): string
         const [is, it] = isPlural(String(r.item)) ? ["are", "They"] : ["is", "It"];
         return r.note === "already theirs" ? `The ${r.item} ${is} already yours.` : `The ${r.item} ${is} yours! ${it} ${agree(String(r.item), String(r.status))}.`;
       }
-      if (r.past_usda_date) return `The ${r.item} is past its USDA FoodKeeper date, so please toss it instead.`;
+      if (r.past_usda_date) {
+        const [is, its, it] = isPlural(String(r.item)) ? ["are", "their", "them"] : ["is", "its", "it"];
+        return `The ${r.item} ${is} past ${its} USDA FoodKeeper date, so please toss ${it} instead.`;
+      }
       if (r.winner) return `Sorry, ${r.winner} already claimed the ${r.item}.`;
       if (r.which_one) return `Which one: ${(r.which_one as string[]).join(" or ")}?`;
       return "Which item do you want to claim?";

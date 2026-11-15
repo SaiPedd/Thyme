@@ -218,4 +218,12 @@ CREATE TABLE mealdb_by_ingredient (
 ALTER TABLE ledger ADD COLUMN priced INTEGER NOT NULL DEFAULT 0 CHECK (priced IN (0,1));
 CREATE INDEX ledger_by_household ON ledger(household_id, kind, at);
 `,
+  // 6: who logged an expense (may differ from the buyer: "Sam paid"), so the logger can undo it.
+  `
+ALTER TABLE expenses ADD COLUMN logged_by_member_id INTEGER REFERENCES members(id);
+`,
+  // 7: fridge items added from a receipt remember its expense, so undoing the expense removes them too.
+  `
+ALTER TABLE items ADD COLUMN expense_id INTEGER REFERENCES expenses(id);
+`,
 ];

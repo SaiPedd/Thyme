@@ -29,6 +29,8 @@ import {
 import { mask, normalizePhone } from "./domain/phone";
 import type { Outbox } from "./outbox";
 import type { Draft } from "./privacy/projection";
+import { getPendingReceipt, handleReceiptReply, pendingFromCheck, receiptSummary, savePendingReceipt, parseReceiptReply } from "./receipts/flow";
+import { checkReceipt, downloadImage, maybeImage, readReceipt, ReceiptError, type DownloadOptions, type RawReceipt } from "./receipts/receipt";
 
 export const HISTORY_LIMIT = 12;
 
@@ -45,12 +47,24 @@ export interface RouterDeps {
   log?: (line: string) => void;
   /** Terminal mode: a stand-in group chat id that is accepted but never saved as the household chat. */
   devGroupChatId?: string;
+  /** Receipt photos: how to download (Claw key, file:// in terminal) and, for tests, a stand-in reader. */
+  receipts?: DownloadOptions & { read?: (att: { url: string; mimeType?: string }) => Promise<RawReceipt> };
 }
+
+const RECEIPT_ERRORS: Record<ReceiptError["code"], string> = {
+  download: "I couldn't download that photo. Could you send it again?",
+  not_image: "That doesn't look like a photo. Send a picture of the receipt and I'll read it.",
+  timeout: "Reading that receipt took too long. Try a clearer, closer photo, or type it like \"groceries $48.60 split 3 ways\".",
+  unreadable: "I couldn't read a receipt in that photo. Try a clearer, flatter shot, or type it like \"groceries $48.60 split 3 ways\".",
+  llm: "I'm having trouble reading receipts right now. You can type it like \"groceries $48.60 split 3 ways\".",
+};
 
 /** Should the agent speak in a group for this message? */
 export function shouldReplyInGroup(m: InboundMessage, triggers: Triggers, repliedToBot: boolean, awaitingYes = false): boolean {
   const text = m.text.trim();
   if (!text && m.attachments.length === 0) return false;
+  // A photo in the household group is a receipt to read.
+  if (m.attachments.some(maybeImage)) return true;
   if (triggers.mentions(text)) return true;
   if (repliedToBot) return true;
   if (/\?\s*$/.test(text)) return true;
@@ -96,6 +110,41 @@ export function makeRouter(deps: RouterDeps) {
   const log = deps.log ?? ((l: string) => console.log(l));
   const { db } = deps;
   const triggers = makeTriggers(deps.botName, deps.botAliases ?? []);
+
+  /** Download, read, and check a receipt photo; save it as pending and return the summary to show. */
+  async function startReceipt(att: { url: string; mimeType?: string }, caption: string, rctx: Parameters<typeof handleReceiptReply>[0] & { isGroup: boolean }): Promise<string | null> {
+    if (!deps.receipts?.read && !deps.client) {
+      return "I can read receipt photos when the AI is on. For now, type it like \"groceries $48.60 split 3 ways\".";
+    }
+    let raw: RawReceipt;
+    try {
+      if (deps.receipts?.read) raw = await deps.receipts.read(att);
+      else {
+        // The bytes exist only inside this block and are dropped once Gemini has read them.
+        const image = await downloadImage(att, deps.receipts ?? {});
+        log(`[receipt] ${image.mime}, ${Math.round(image.bytes.byteLength / 1024)} KB`);
+        raw = await readReceipt(deps.client!, deps.model, image);
+      }
+    } catch (error) {
+      const code = error instanceof ReceiptError ? error.code : "llm";
+      log(`[receipt] failed: ${code}`);
+      // A video or voice memo in the group isn't meant for us: stay quiet. In a DM, say what we need.
+      if (code === "not_image" && rctx.isGroup) return null;
+      return RECEIPT_ERRORS[code];
+    }
+    const checked = checkReceipt(raw);
+    log(`[receipt] ${checked.items.length} items, ${checked.balanced ? "balanced" : "does not add up"}${checked.dropped ? `, ${checked.dropped} non-item lines dropped` : ""}`);
+    // Not a receipt (a meme, a selfie): stay quiet in the group; say so in a DM.
+    if (checked.items.length === 0) return rctx.isGroup ? null : RECEIPT_ERRORS.unreadable;
+    const pending = pendingFromCheck(checked, rctx.member.id);
+    savePendingReceipt(db, pending);
+    // A caption like "Sam paid" or "2 is mine" applies right away.
+    if (caption && parseReceiptReply(caption, rctx.members, rctx.member.id)) {
+      const updated = handleReceiptReply(rctx, caption.replace(/^(yes|ok|okay|confirm)\b[,\s]*/i, ""));
+      if (updated) return updated;
+    }
+    return receiptSummary(pending, rctx.members);
+  }
 
   return async function handle(m: InboundMessage): Promise<void> {
     const household = getHousehold(db);
@@ -161,6 +210,24 @@ export function makeRouter(deps: RouterDeps) {
     const members = getMembers(db, household.id);
     const shown = m.isGroup ? `${member.name}: ${m.text}` : m.text;
     const repliedToBot = !!m.replyTo && !!db.query("SELECT 1 FROM sends WHERE message_id = ?").get(m.replyTo.messageId);
+    const reply = async (text: string) => {
+      if (m.isGroup) await deps.outbox.send({ audience: { kind: "group" }, text, sensitivity: "household" }, { kind: "reply", replyTo: m.messageId });
+      else await deps.outbox.send({ audience: { kind: "member", memberId: member.id }, text, sensitivity: "personal", subjectMemberId: member.id }, { kind: "reply" });
+      saveTurn(db, m.chatId, null, "assistant", text, at);
+    };
+    const receiptDrafts: Draft[] = [];
+    const rctx = { db, householdId: household.id, tz: household.tz, members, member, messageId: m.messageId, isGroup: m.isGroup, drafts: receiptDrafts };
+
+    // A reply to this person's pending receipt ("yes", "Sam paid", "2 is mine", "cancel"): handled in code.
+    const images = m.attachments.filter(maybeImage);
+    const receiptReply = images.length ? null : handleReceiptReply(rctx, triggers.strip(m.text));
+    if (receiptReply) {
+      saveTurn(db, m.chatId, member, "user", shown, at);
+      log(`[in] ${m.isGroup ? "group" : "dm"} from ${mask(phone)}: receipt reply`);
+      await reply(receiptReply);
+      for (const d of receiptDrafts) await deps.outbox.send(d, { kind: "reply" });
+      return;
+    }
 
     if (m.isGroup && !shouldReplyInGroup(m, triggers, repliedToBot, hasPendingCook(db, member.id))) {
       saveTurn(db, m.chatId, member, "user", shown, at);
@@ -168,6 +235,14 @@ export function makeRouter(deps: RouterDeps) {
       return;
     }
     log(`[in] ${m.isGroup ? "group" : "dm"} from ${mask(phone)}${m.attachments.length ? ` (${m.attachments.length} attachment)` : ""}`);
+
+    if (images.length) {
+      saveTurn(db, m.chatId, member, "user", `${shown} [sent a photo]`, at);
+      await deps.adapter.typing?.(m.isGroup ? { kind: "group", chatId: m.chatId } : { kind: "member", phone }, true).catch(() => {});
+      const text = await startReceipt(images[0]!, triggers.strip(m.text), rctx);
+      if (text) await reply(text);
+      return;
+    }
 
     const drafts: Draft[] = [];
     const ctx: ToolContext = {
