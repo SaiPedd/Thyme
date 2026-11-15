@@ -22,7 +22,7 @@ import { allocate, lookupPhrase, type CheckedReceipt, type ReceiptLine } from ".
 export const RECEIPT_TTL_MS = 60 * 60 * 1000;
 
 /** Lines that belong in the bill but not in the fridge. */
-const NOT_FOOD = /\b(bag|bags|fee|deposit|crv|tip|donation|gift|coupon|service|paper towels?|toilet paper|detergent|soap|shampoo|toothpaste|batter(y|ies)|foil|napkins?|sponges?|trash)\b/i;
+const NOT_FOOD = /\b(bag|bags|fee|deposit|crv|tip|donation|gift|coupon|service|paper towels?|paper plates?|plates?|utensils?|forks?|straws?|toilet paper|detergent|soap|shampoo|toothpaste|batter(y|ies)|foil|napkins?|sponges?|trash)\b/i;
 
 export interface PendingReceipt {
   store: string | null;

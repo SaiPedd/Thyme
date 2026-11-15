@@ -1,5 +1,40 @@
 # Fridge Squad demo script
 
+## 2-minute video (screen recording of iMessage)
+
+Track: **Sustainability**. One phone (yours) records; roommates are seeded with names (`SEED_MEMBERS` in `.env`)
+and don't need to be awake. Below, `<Roommate>` is one roommate's first name exactly as in `SEED_MEMBERS`.
+
+### Setup on the laptop (before recording)
+```
+rm data/fridge.db data/fridge.db-shm data/fridge.db-wal
+bun run seed
+bun run register-phones      # skip if already done
+bun run spike                # skip if the group chat already exists
+bun start                    # leave running
+```
+AirDrop `~/Desktop/receipts/1_one_price_blurry.jpg` to your phone. Have a second terminal open in the repo.
+Text the group `Thyme hi` once before recording, so Thyme has adopted the group chat.
+
+### Record (type exactly this in the group; voiceover in quotes)
+
+| Time | Type | Voiceover |
+|---|---|---|
+| 0:00 | (show the group chat) | "Roommates waste food and fight over grocery money. Thyme lives in your iMessage group chat and fixes both: no app to install." |
+| 0:10 | Send the photo with caption `Thyme receipt` | "I send a blurry receipt. Thyme reads it; the yogurt's price was too blurry, so code works it out from the total instead of guessing." |
+| 0:30 | `5 is <Roommate>'s, split between me and <Roommate>` | "Edge case: the ground beef is just my roommate's, and only the two of us split the rest." |
+| 0:40 | `yes` | "Code does the math to the cent, and the food goes on our fridge list with USDA expiry dates. Paper plates don't." |
+| 0:50 | `Thyme what do I owe?` (then open your DM with Thyme) | "Balances are private: the group never sees them. They only go to your DM." |
+| 1:00 | `Thyme I tossed the ground beef` | "Edge case: I can't throw out my roommate's food. Their personal items are invisible to me." |
+| 1:10 | `Thyme I tossed the carrots` | "Shared food I can toss, and it goes in the waste ledger." |
+| 1:20 | Laptop: `bun run time-travel +1d10h`, then back to the phone | "Now a day passes." (Thyme posts a reminder about food expiring within 48 hours.) |
+| 1:30 | `Thyme what can I make tonight?` | "It suggests a real recipe built around what's about to expire." |
+| 1:40 | `Thyme where can we donate the eggs?` | "And instead of tossing, it points us to a local pantry, only if it's safe to give." |
+| 1:50 | `Thyme how much food have we wasted?` | "The house sees what it wasted and what it saved. Thyme: less waste, no awkward money talk." |
+
+If a reply looks wrong: `undo` (receipt or expense), or `cancel` before `yes`, and redo that step.
+Stop `bun start` with Ctrl+C after recording.
+
 About 4 minutes. Rehearse it 3 to 5 times from a fresh seed, and record one clean run as a backup video.
 
 ## Before the demo (10 minutes ahead)
