@@ -13,7 +13,7 @@ import type { Adapter, InboundMessage } from "./adapters/types";
 import { runAgent, type AgentInput, type HistoryTurn } from "./agent/loop";
 import { parseIntent } from "./agent/fallback";
 import { makeTriggers, type Triggers } from "./agent/triggers";
-import type { ToolContext } from "./agent/tools";
+import { hasPendingCook, type ToolContext } from "./agent/tools";
 import { now } from "./clock";
 import { localDate } from "./domain/expenses";
 import {
@@ -46,13 +46,16 @@ export interface RouterDeps {
 }
 
 /** Should the agent speak in a group for this message? */
-export function shouldReplyInGroup(m: InboundMessage, triggers: Triggers, repliedToBot: boolean): boolean {
+export function shouldReplyInGroup(m: InboundMessage, triggers: Triggers, repliedToBot: boolean, awaitingYes = false): boolean {
   const text = m.text.trim();
   if (!text && m.attachments.length === 0) return false;
   if (triggers.mentions(text)) return true;
   if (repliedToBot) return true;
   if (/\?\s*$/.test(text)) return true;
-  return parseIntent(triggers.strip(text)) !== null;
+  const intent = parseIntent(triggers.strip(text));
+  // A bare "yes" in the group only counts when we asked this person to confirm something.
+  if (intent?.kind === "confirm") return awaitingYes;
+  return intent !== null;
 }
 
 export function introText(botName: string, triggers: Triggers, askNames = true): string {
@@ -157,7 +160,7 @@ export function makeRouter(deps: RouterDeps) {
     const shown = m.isGroup ? `${member.name}: ${m.text}` : m.text;
     const repliedToBot = !!m.replyTo && !!db.query("SELECT 1 FROM sends WHERE message_id = ?").get(m.replyTo.messageId);
 
-    if (m.isGroup && !shouldReplyInGroup(m, triggers, repliedToBot)) {
+    if (m.isGroup && !shouldReplyInGroup(m, triggers, repliedToBot, hasPendingCook(db, member.id))) {
       saveTurn(db, m.chatId, member, "user", shown, at);
       log(`[in] group from ${mask(phone)}: context only`);
       return;
@@ -165,7 +168,7 @@ export function makeRouter(deps: RouterDeps) {
     log(`[in] ${m.isGroup ? "group" : "dm"} from ${mask(phone)}${m.attachments.length ? ` (${m.attachments.length} attachment)` : ""}`);
 
     const drafts: Draft[] = [];
-    const ctx: ToolContext = { db, household, members, member, isGroup: m.isGroup, messageId: m.messageId, sentAt: m.sentAt, drafts };
+    const ctx: ToolContext = { db, household, members, member, isGroup: m.isGroup, messageId: m.messageId, chatId: m.chatId, sentAt: m.sentAt, drafts };
     const history = loadHistory(db, m.chatId);
     saveTurn(db, m.chatId, member, "user", shown, at);
 

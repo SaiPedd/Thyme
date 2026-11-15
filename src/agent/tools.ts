@@ -7,6 +7,9 @@ import { formatCents, parseCents } from "../domain/money";
 import { balancesFor, DuplicateExpenseError, recordExpense, undoLastExpense } from "../domain/expenses";
 import { searchShelfLife, type ShelfLifeRow, type Storage } from "../domain/foodkeeper";
 import { claimItem, claimTime, claimWinner } from "../domain/claims";
+import { now } from "../clock";
+import { forgetMember, prefsFor, removePref, savePref, type PrefKind } from "../domain/prefs";
+import { pickRecipes, uncheckedDiets, validateRecipe, type RecipeCheck } from "../domain/recipes";
 import {
   addItem,
   expiryPhrase,
@@ -31,6 +34,8 @@ export interface ToolContext {
   member: Member;
   isGroup: boolean;
   messageId?: string;
+  /** The chat this message came from (used by "forget me" to clear a DM's history). */
+  chatId?: string;
   /** When the sender sent the message (channel time), for claim arbitration. */
   sentAt?: string;
   /** Extra messages to send after the reply (e.g. a private balance DM). */
@@ -433,6 +438,232 @@ const claimTool: ToolDef = {
   },
 };
 
+// --- Kitchen companion -------------------------------------------------------------------------
+
+const RECIPE_TTL_MS = 6 * 3_600_000;
+
+function getJsonState<T>(ctx: ToolContext, key: string): T | null {
+  const row = ctx.db.query<{ value: string }, [string]>("SELECT value FROM state WHERE key = ?").get(key);
+  if (!row) return null;
+  const v = JSON.parse(row.value) as T & { at: string };
+  return Date.parse(v.at) + RECIPE_TTL_MS >= now().getTime() ? v : null;
+}
+
+function setJsonState(ctx: ToolContext, key: string, value: Record<string, unknown>) {
+  ctx.db.run("INSERT INTO state (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value", [
+    key,
+    JSON.stringify({ ...value, at: now().toISOString() }),
+  ]);
+}
+
+/** True if this member has an "I cooked it" waiting for a yes (lets a bare "yes" through in the group). */
+export function hasPendingCook(db: Database, memberId: number): boolean {
+  const row = db.query<{ value: string }, [string]>("SELECT value FROM state WHERE key = ?").get(`cook:${memberId}`);
+  return !!row && Date.parse((JSON.parse(row.value) as { at: string }).at) + RECIPE_TTL_MS >= now().getTime();
+}
+
+const ingredientList = (check: RecipeCheck) =>
+  check.checks.map((c) => (c.staple ? `${c.ingredient} (staple)` : c.item && c.item !== c.ingredient ? `${c.ingredient} (the ${c.item})` : c.ingredient));
+
+const suggestRecipeTool: ToolDef = {
+  name: "suggest_recipe",
+  description:
+    "Recipe ideas from what's actually in the kitchen. With no recipe, code picks a simple one that uses food about to expire. " +
+    "To suggest your own idea, pass it as recipe: code checks every ingredient is in the inventory (salt, oil, water assumed) and fits " +
+    "everyone's saved diets, dislikes, and allergies. Only suggest a recipe this tool returned with ok: true. Never say a dish is allergy-safe.",
+  input_schema: {
+    type: "object",
+    properties: {
+      for: { type: "array", items: { type: "string" }, description: "Who's eating: names or \"everyone\". Default: the sender." },
+      another: { type: "boolean", description: "True if they want something different from the last idea" },
+      recipe: {
+        type: "object",
+        properties: {
+          title: { type: "string" },
+          ingredients: { type: "array", items: { type: "string" } },
+          steps: { type: "array", items: { type: "string" } },
+        },
+        required: ["title", "ingredients", "steps"],
+        additionalProperties: false,
+      },
+    },
+    additionalProperties: false,
+  },
+  run(input, ctx) {
+    const diners = resolveMany(ctx, input.for, [ctx.member.id]);
+    if ("error" in diners) return diners;
+    const items = visibleItems(ctx.db, ctx.household.id, ctx.member.id, { sharedOnly: ctx.isGroup });
+    const prefs = prefsFor(ctx.db, diners);
+    const notes: string[] = [];
+    if (prefs.some((p) => p.kind === "allergy")) {
+      notes.push("Saved allergies were avoided by ingredient name only. Say you can't promise any dish is allergy-safe and to check every label." +
+        (ctx.isGroup ? " Don't say whose allergy." : ""));
+    }
+    const unchecked = uncheckedDiets(prefs);
+    if (unchecked.length) notes.push(`These diets can't be checked automatically: ${unchecked.join(", ")}. Ask them to double-check.`);
+    notes.push("Cook meat, poultry, fish, and eggs all the way through.");
+
+    const remember = (title: string, check: RecipeCheck) => setJsonState(ctx, `recipe:${ctx.member.id}`, { title, itemIds: check.itemIds });
+
+    if (input.recipe) {
+      const r = input.recipe as { title: string; ingredients: string[]; steps: string[] };
+      const check = validateRecipe(r.ingredients ?? [], items, prefs);
+      if (!check.ok) {
+        return {
+          ok: false,
+          missing_from_kitchen: check.missing,
+          conflicts: check.conflicts.map((c) => `${c.ingredient}: ${c.conflict}`),
+          available: items.map((i) => i.name),
+          note: "Don't suggest this. Propose one using only available items, or call again without recipe.",
+        };
+      }
+      remember(r.title, check);
+      return { ok: true, title: r.title, ingredients: ingredientList(check), steps: r.steps, uses_food_expiring_soon: check.expiringUsed, notes };
+    }
+
+    const last = input.another ? getJsonState<{ title: string }>(ctx, `recipe:${ctx.member.id}`) : null;
+    const picks = pickRecipes(items, prefs, last ? [last.title] : []);
+    const best = picks[0];
+    if (!best) {
+      return {
+        ok: false,
+        available: items.map((i) => i.name),
+        note: items.length ? "No simple recipe fits what's here. You may propose one using only these, then call again with it." : "Nothing is logged in the kitchen yet.",
+      };
+    }
+    remember(best.recipe.title, best.check);
+    return {
+      ok: true,
+      title: best.recipe.title,
+      ingredients: ingredientList(best.check),
+      steps: best.recipe.steps,
+      uses_food_expiring_soon: best.check.expiringUsed,
+      other_ideas: picks.slice(1, 3).map((p) => p.recipe.title),
+      notes,
+    };
+  },
+};
+
+const cookedTool: ToolDef = {
+  name: "cooked_recipe",
+  description:
+    "They cooked the last suggested recipe (\"I made it\", \"cooked it\"). First call without confirm: it returns the items it would mark used, " +
+    "so ask them to confirm. Call with confirm: true only after they say yes.",
+  input_schema: {
+    type: "object",
+    properties: { confirm: { type: "boolean" } },
+    additionalProperties: false,
+  },
+  run(input, ctx) {
+    const freshNames = (ids: number[]) =>
+      ids
+        .map((id) => ctx.db.query<Item, [number]>("SELECT * FROM items WHERE id = ? AND status = 'fresh'").get(id))
+        .filter((i): i is Item => !!i);
+    if (input.confirm === true) {
+      const pending = getJsonState<{ title: string; itemIds: number[] }>(ctx, `cook:${ctx.member.id}`);
+      if (!pending) return { done: false, note: "Nothing is waiting for confirmation." };
+      const items = freshNames(pending.itemIds);
+      const rescued = items.filter((i) => isAtRisk(i) && !isPast(i)).map((i) => i.name);
+      for (const i of items) setItemStatus(ctx.db, i.id, "used");
+      ctx.db.run("DELETE FROM state WHERE key = ?", [`cook:${ctx.member.id}`]);
+      return { done: true, title: pending.title, marked_used: items.map((i) => i.name), rescued };
+    }
+    const last = getJsonState<{ title: string; itemIds: number[] }>(ctx, `recipe:${ctx.member.id}`);
+    if (!last) return { done: false, note: "No recent recipe suggestion. Ask what they used, then use use_item." };
+    const items = freshNames(last.itemIds);
+    if (!items.length) return { done: false, note: "Those ingredients are already marked used." };
+    setJsonState(ctx, `cook:${ctx.member.id}`, { title: last.title, itemIds: items.map((i) => i.id) });
+    return { needs_confirmation: true, title: last.title, would_mark_used: items.map((i) => i.name) };
+  },
+};
+
+const PREF_KINDS = ["diet", "dislike", "allergy", "like"];
+
+const savePrefTool: ToolDef = {
+  name: "save_preference",
+  description:
+    "Remember (or, with remove: true, forget) one of the sender's food preferences: a diet (vegetarian, vegan, pescatarian, gluten-free, dairy-free), " +
+    "a dislike, an allergy, or a like. Preferences are private: in the group, don't repeat them, and never say who has an allergy.",
+  input_schema: {
+    type: "object",
+    properties: {
+      kind: { type: "string", enum: PREF_KINDS },
+      value: { type: "string", description: "e.g. \"vegetarian\", \"mushrooms\", \"peanuts\"" },
+      remove: { type: "boolean" },
+    },
+    required: ["kind", "value"],
+    additionalProperties: false,
+  },
+  run(input, ctx) {
+    const kind = String(input.kind) as PrefKind;
+    const value = String(input.value ?? "").trim();
+    if (!PREF_KINDS.includes(kind) || !value) return { saved: false, error: "need a kind and a value" };
+    if (input.remove === true) {
+      const removed = removePref(ctx.db, ctx.member.id, kind, value);
+      return ctx.isGroup ? { removed } : { removed, kind, value };
+    }
+    const r = savePref(ctx.db, ctx.member.id, kind, value);
+    return ctx.isGroup
+      ? { saved: true, kind, note: "Saved privately. Don't repeat what it was in the group." }
+      : { saved: true, kind, value: r.value, ...(r.saved ? {} : { note: "already saved" }) };
+  },
+};
+
+const getPrefsTool: ToolDef = {
+  name: "get_preferences",
+  description: "The sender's own saved food preferences. In the group they're sent by DM instead.",
+  input_schema: { type: "object", properties: {}, additionalProperties: false },
+  run(_input, ctx) {
+    const prefs = prefsFor(ctx.db, [ctx.member.id]);
+    const lines = prefs.map((p) => `${p.kind}: ${p.value}`);
+    if (!ctx.isGroup) return { preferences: lines };
+    ctx.drafts.push({
+      audience: { kind: "member", memberId: ctx.member.id },
+      sensitivity: "personal",
+      subjectMemberId: ctx.member.id,
+      text: lines.length ? ["Your saved food preferences:", ...lines].join("\n") : "You haven't saved any food preferences yet.",
+    });
+    return { sent_privately: true, note: "Preferences are private. They were sent to the person's DM." };
+  },
+};
+
+const forgetMeTool: ToolDef = {
+  name: "forget_me",
+  description: "Delete the sender's saved preferences and conversation history (\"forget me\"). Expenses and balances are kept so everyone's totals stay right.",
+  input_schema: { type: "object", properties: {}, additionalProperties: false },
+  run(_input, ctx) {
+    const r = forgetMember(ctx.db, ctx.member.id, ctx.isGroup ? undefined : ctx.chatId);
+    return { forgotten: true, preferences_deleted: r.prefs, messages_deleted: r.turns, kept: "expenses and balances" };
+  },
+};
+
+const checkItemTool: ToolDef = {
+  name: "check_item",
+  description:
+    "Is a food still good? Looks it up in the kitchen inventory (with its USDA FoodKeeper date), else in FoodKeeper. " +
+    "Food safety is conservative: if anything is unsure, or it looks, smells, or feels off, say to toss it.",
+  input_schema: {
+    type: "object",
+    properties: { item: { type: "string" } },
+    required: ["item"],
+    additionalProperties: false,
+  },
+  run(input, ctx) {
+    const item = findItem(ctx.db, ctx.household.id, ctx.member.id, String(input.item ?? ""), { sharedOnly: ctx.isGroup });
+    if (item) {
+      const past = isPast(item);
+      return {
+        item: item.name,
+        status: expiryPhrase(item, ctx.household.tz, itemNote(ctx.db, item)),
+        advice: past
+          ? "Past its USDA FoodKeeper date: toss it."
+          : "Within its USDA FoodKeeper date. If it looks, smells, or feels off, toss it anyway.",
+      };
+    }
+    return { ...shelfLifeTool.run({ query: input.item }, ctx), advice: "Not in the kitchen list. If unsure how long it's been, toss it." };
+  },
+};
+
 export const TOOLS: ToolDef[] = [
   recordExpenseTool,
   undoTool,
@@ -443,6 +674,12 @@ export const TOOLS: ToolDef[] = [
   tossItemTool,
   inventoryTool,
   claimTool,
+  suggestRecipeTool,
+  cookedTool,
+  savePrefTool,
+  getPrefsTool,
+  forgetMeTool,
+  checkItemTool,
   summaryTool,
 ];
 

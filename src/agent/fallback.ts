@@ -1,6 +1,7 @@
 // Rule-based fallback (LLM=off, no key, timeout, or failure). Handles the core patterns:
 // "got X, Y", "used the X", "tossed X", "groceries $N split K ways", "undo", "what do I owe",
-// "what's in the fridge", and claims ("mine", "I'll take the X").
+// "what's in the fridge", claims ("mine", "I'll take the X"), recipes, "I cooked it" + "yes",
+// food preferences, "is the X still good?", and "forget me".
 // Uses the same tools as the agent, so facts come from code either way.
 
 import { runTool, type ToolContext } from "./tools";
@@ -14,12 +15,19 @@ export type Intent =
   | { kind: "use"; item: string }
   | { kind: "toss"; item: string }
   | { kind: "inventory" }
-  | { kind: "claim"; item?: string };
+  | { kind: "claim"; item?: string }
+  | { kind: "recipe"; another?: boolean }
+  | { kind: "cooked" }
+  | { kind: "confirm" }
+  | { kind: "pref"; pref: "diet" | "dislike" | "allergy" | "like"; value: string }
+  | { kind: "my_prefs" }
+  | { kind: "forget" }
+  | { kind: "check"; item: string };
 
 const WORDS: Record<string, number> = { two: 2, three: 3, four: 4, five: 5, six: 6 };
 
 /** Words that follow "got" but aren't food ("got it", "got home"). */
-const NOT_FOOD = new Set(["it", "this", "that", "them", "you", "home", "back", "here", "there", "paid", "time", "one", "nothing", "everything"]);
+const NOT_FOOD = new Set(["it", "this", "that", "them", "you", "home", "back", "here", "there", "paid", "time", "one", "nothing", "everything", "him", "her", "people", "mondays"]);
 
 function splitList(s: string): string[] {
   return s
@@ -52,6 +60,29 @@ export function parseIntent(raw: string, botName = ""): Intent | null {
       mineItems,
     };
   }
+
+  if (/^forget (me|about me|my (data|info|preferences|prefs))\b/.test(t)) return { kind: "forget" };
+  if (/^(yes|yep|yeah|yup|y|confirm|do it|sure)[\s!.]*$/.test(t)) return { kind: "confirm" };
+  if (/^(i |we )?(cooked|made) (it|that|this|the recipe)\b|^(done cooking|just cooked it)\b/.test(t)) return { kind: "cooked" };
+  if (/\b(something else|another (one|recipe|idea)|anything else|other ideas?)\b/.test(t)) return { kind: "recipe", another: true };
+  if (/\bwhat (can|should|could) (i|we) (make|cook|eat)\b|\brecipes?\b|\b(ideas?|plans?) for (dinner|lunch|breakfast)\b|\bwhat'?s for (dinner|lunch|breakfast)\b|\bi'?m (so )?hungry\b/.test(t)) {
+    return { kind: "recipe" };
+  }
+  if (/\bmy (food )?(preferences|prefs|allergies|diet)\b|what do you know about me/.test(t)) return { kind: "my_prefs" };
+  let p = t.match(/^(?:i'?m|i am)\s+(?:a\s+|now\s+)?(vegetarian|vegan|pescatarian|gluten[- ]free|dairy[- ]free|lactose intolerant|celiac|kosher|halal|keto)\b/);
+  if (p) return { kind: "pref", pref: "diet", value: p[1]!.replace("lactose intolerant", "dairy-free").replace("celiac", "gluten-free") };
+  if (/^i (don'?t|do not) eat meat\b/.test(t)) return { kind: "pref", pref: "diet", value: "vegetarian" };
+  p = t.match(/^(?:i'?m |i am )?(?:allergic to|i have an? allergy to)\s+(.+)|^i have an? (.+?) allergy\b/);
+  if (p) return { kind: "pref", pref: "allergy", value: cleanItem(p[1] ?? p[2]!) };
+  p = t.match(/^i (?:don'?t|do not) (?:like|eat|want)\s+(.+)|^i (?:hate|can'?t stand)\s+(.+)|^no (.+?) for me\b/);
+  if (p) {
+    const v = cleanItem(p[1] ?? p[2] ?? p[3]!);
+    if (!NOT_FOOD.has(v)) return { kind: "pref", pref: "dislike", value: v };
+  }
+  p = t.match(/^i (?:love|really like)\s+(.+)/);
+  if (p && !NOT_FOOD.has(cleanItem(p[1]!))) return { kind: "pref", pref: "like", value: cleanItem(p[1]!) };
+  p = t.match(/^(?:is|are) (?:the |my |our |this |that )?(.+?) (?:still )?(?:good|ok|okay|safe|fine)(?: to eat)?\b|^how long (?:does|do|will|can) (?:the |my |our )?(.+?) (?:last|keep|stay good)\b|^(?:has|have) (?:the |my )?(.+?) gone bad\b/);
+  if (p) return { kind: "check", item: cleanItem(p[1] ?? p[2] ?? p[3]!) };
 
   if (/\b(what'?s|what is|whats)\s+(in\s+(the\s+|our\s+)?(fridge|pantry|freezer|kitchen)|expiring|going bad)|\bwhat (food )?do we have\b|\binventory\b/.test(t)) {
     return { kind: "inventory" };
@@ -125,10 +156,55 @@ export function describeToolResult(name: string, r: Record<string, any>): string
       if (r.winner) return `Sorry, ${r.winner} already claimed the ${r.item}.`;
       if (r.which_one) return `Which one: ${(r.which_one as string[]).join(" or ")}?`;
       return "Which item do you want to claim?";
+    case "suggest_recipe": {
+      if (!r.ok) {
+        const avail = (r.available as string[] | undefined) ?? [];
+        return avail.length
+          ? `I don't have a simple recipe that fits what's here (${avail.join(", ")}). Tell me what you're in the mood for?`
+          : "Nothing's logged in the kitchen yet. Tell me what you bought, like \"got spinach and eggs\".";
+      }
+      const expiring = (r.uses_food_expiring_soon as string[]) ?? [];
+      const allergy = ((r.notes as string[]) ?? []).some((n) => n.startsWith("Saved allergies"));
+      return [
+        `Try ${String(r.title).toLowerCase()}: ${(r.ingredients as string[]).join(", ")}.`,
+        ...(expiring.length ? [`It uses up the ${list(expiring)} before ${expiring.length === 1 && !isPlural(expiring[0]!) ? "it goes" : "they go"} bad.`] : []),
+        ...(r.steps as string[]).map((st, i) => `${i + 1}. ${st}`),
+        ...(allergy ? ["I avoided saved allergies by name, but I can't promise any dish is allergy-safe. Check every label."] : []),
+        `Say "something else" for another idea, or "I made it" when you're done.`,
+      ].join("\n");
+    }
+    case "cooked_recipe":
+      if (r.needs_confirmation) return `Nice! Should I mark the ${list(r.would_mark_used as string[])} as used? Reply "yes".`;
+      if (r.done) {
+        const rescued = (r.rescued as string[]) ?? [];
+        return `Done: marked the ${list(r.marked_used as string[])} as used.${rescued.length ? ` You rescued the ${list(rescued)}!` : ""}`;
+      }
+      return r.note === "Nothing is waiting for confirmation." ? null : "Which recipe? Tell me what you used, like \"used the spinach\".";
+    case "save_preference":
+      if (r.removed !== undefined) return r.removed ? "Okay, I've removed that." : "I didn't have that saved.";
+      if (!r.saved) return "I didn't catch that preference.";
+      if (r.value === undefined) return "Got it, I'll remember that for recipe ideas.";
+      return r.kind === "allergy"
+        ? `Got it: I'll keep ${r.value} out of recipe ideas for you. I can't promise anything is allergy-safe, so always check labels.`
+        : r.kind === "diet"
+          ? `Got it: ${r.value} recipes for you from now on.`
+          : r.kind === "dislike"
+            ? `Got it: no ${r.value} in your recipe ideas.`
+            : `Noted: you like ${r.value}.`;
+    case "get_preferences":
+      if (r.sent_privately) return "I DM'd you what I have saved.";
+      return (r.preferences as string[]).length ? ["Here's what I have saved for you:", ...(r.preferences as string[])].join("\n") : "You haven't saved any food preferences yet.";
+    case "forget_me":
+      return `Done. I deleted your saved preferences and our chat history. Expenses and balances stay so everyone's totals are right.`;
+    case "check_item":
+      if (r.item) return `The ${r.item}: ${r.status}. ${r.advice}`;
+      return describeToolResult("shelf_life_lookup", r);
     default:
       return null;
   }
 }
+
+const list = (xs: string[]) => (xs.length <= 1 ? (xs[0] ?? "") : `${xs.slice(0, -1).join(", ")} and ${xs.at(-1)}`);
 
 /** Run the intent with the shared tools and word the reply with fixed templates. */
 export function runFallback(text: string, ctx: ToolContext, botName = ""): string | null {
@@ -158,5 +234,19 @@ export function runFallback(text: string, ctx: ToolContext, botName = ""): strin
       return describeToolResult("get_inventory", runTool("get_inventory", {}, ctx));
     case "claim":
       return describeToolResult("claim_item", runTool("claim_item", intent.item ? { item: intent.item } : {}, ctx));
+    case "recipe":
+      return describeToolResult("suggest_recipe", runTool("suggest_recipe", intent.another ? { another: true } : {}, ctx));
+    case "cooked":
+      return describeToolResult("cooked_recipe", runTool("cooked_recipe", {}, ctx));
+    case "confirm":
+      return describeToolResult("cooked_recipe", runTool("cooked_recipe", { confirm: true }, ctx));
+    case "pref":
+      return describeToolResult("save_preference", runTool("save_preference", { kind: intent.pref, value: intent.value }, ctx));
+    case "my_prefs":
+      return describeToolResult("get_preferences", runTool("get_preferences", {}, ctx));
+    case "forget":
+      return describeToolResult("forget_me", runTool("forget_me", {}, ctx));
+    case "check":
+      return describeToolResult("check_item", runTool("check_item", { item: intent.item }, ctx));
   }
 }

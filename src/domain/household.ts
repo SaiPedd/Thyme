@@ -71,7 +71,11 @@ export function setMemberName(db: Database, memberId: number, name: string): voi
   db.run("UPDATE members SET name = ?, named = 1 WHERE id = ?", [name, memberId]);
 }
 
-const NOT_NAMES = new Set(["here", "in", "out", "back", "home", "done", "good", "fine", "ok", "okay", "hungry", "sorry", "not", "so", "just", "going", "at", "on"]);
+const NOT_NAMES = new Set([
+  "here", "in", "out", "back", "home", "done", "good", "fine", "ok", "okay", "hungry", "sorry", "not", "so", "just", "going", "at", "on",
+  // diets and states, so "I'm vegetarian" is a preference, not a name
+  "vegetarian", "vegan", "pescatarian", "allergic", "lactose", "celiac", "kosher", "halal", "keto", "full", "starving", "cooking", "vegeterian",
+]);
 
 /**
  * "I'm Akhila", "my name is Sam", "call me J", "it's Jordan" -> the name, title-cased. Null otherwise.
