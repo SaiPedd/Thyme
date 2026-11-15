@@ -43,6 +43,9 @@ export interface ToolContext {
   sentAt?: string;
   /** Extra messages to send after the reply (e.g. a private balance DM). */
   drafts: Draft[];
+  /** The new message plus the sender's own recent messages. When set, record_expense only accepts
+   *  roommates named there, so the model can't carry people over from someone else's message. */
+  mentionText?: string;
 }
 
 export type ToolResult = Record<string, unknown>;
@@ -86,12 +89,32 @@ function resolveMany(ctx: ToolContext, names: string[] | undefined, fallback: nu
   return ids;
 }
 
+/** The first name the sender never mentioned (in this message or their own recent ones), or null.
+ *  A list naming the whole household is "everyone" and always fine. */
+function unmentioned(ctx: ToolContext, lists: string[][]): string | null {
+  if (ctx.mentionText === undefined) return null;
+  const said = ctx.mentionText.toLowerCase();
+  const word = (w: string) => new RegExp(String.raw`(^|[^a-z])${w.replace(/[^a-z0-9]/g, "")}`).test(said);
+  const wholeHouse = (list: string[]) => {
+    const ids = new Set(list.map((n) => resolveMember(ctx, n)));
+    return ctx.members.every((m) => ids.has(m.id));
+  };
+  for (const n of lists.filter((l) => !wholeHouse(l)).flat()) {
+    const id = resolveMember(ctx, n);
+    if (id === null || id === ctx.member.id) continue;
+    const name = nameOf(ctx, id).toLowerCase();
+    if (!word(name.split(/\s+/)[0]!) && !word(n.trim().toLowerCase())) return nameOf(ctx, id);
+  }
+  return null;
+}
+
 const recordExpenseTool: ToolDef = {
   name: "record_expense",
   description:
     "Record a grocery or household expense and split it. Use when someone says what they spent. " +
     "Pass amounts exactly as the user wrote them (e.g. \"$48.60\"). Code computes every share; never compute shares yourself. " +
-    "If the user says some items are just theirs or just some people's, list those as items. If someone owes a fixed amount, use fixed.",
+    "If the user says some items are just theirs or just some people's, list those as items. If someone owes a fixed amount, use fixed. " +
+    "\"me\" always means the sender of the new message. Only include people named in the new message; never carry people over from earlier messages.",
   input_schema: {
     type: "object",
     properties: {
@@ -106,7 +129,7 @@ const recordExpenseTool: ToolDef = {
           properties: {
             description: { type: "string" },
             amount: { type: "string", description: "As written, e.g. \"$9\"" },
-            members: { type: "array", items: { type: "string" }, description: "Who it's for: \"me\" or names" },
+            members: { type: "array", items: { type: "string" }, description: "Who it's for: \"me\" (the sender of the new message) or names from the new message" },
           },
           required: ["description", "amount", "members"],
           additionalProperties: false,
@@ -131,6 +154,20 @@ const recordExpenseTool: ToolDef = {
   run(input, ctx) {
     const total = parseCents(String(input.total));
     if (!total) return { error: "couldn't read the total amount. Ask the user for it." };
+    const named: string[][] = [
+      ...(input.buyer ? [[String(input.buyer)]] : []),
+      (input.split_among ?? []) as string[],
+      ...((input.items ?? []) as { members?: string[] }[]).map((it) => it.members ?? []),
+      ...((input.fixed ?? []) as { member: string }[]).map((f) => [f.member]),
+    ];
+    const stray = unmentioned(ctx, named);
+    if (stray) {
+      return {
+        error: `${ctx.member.name} sent this message and didn't mention ${stray}, so ${stray} can't be on it. ` +
+          `Where the sender said "me" or "mine", pass "me" (that's ${ctx.member.name}, not ${stray}). For the whole household, leave split_among out. ` +
+          "Call record_expense again with those people now; only ask the user if you still can't tell who they meant.",
+      };
+    }
     const buyerId = input.buyer ? resolveMember(ctx, String(input.buyer)) : ctx.member.id;
     if (buyerId === null) return { error: `unknown buyer "${input.buyer}"` };
     const among = resolveMany(ctx, input.split_among, ctx.members.map((m) => m.id));
@@ -205,7 +242,13 @@ const undoTool: ToolDef = {
       return { undone: true, kind: "toss", item: undone.name, note: "The item is back in the fridge list and its waste split is removed." };
     }
     const undone = undoLastExpense(ctx.db, ctx.household.id, ctx.member.id);
-    return undone ? { undone: true, kind: "expense", total: formatCents(undone.totalCents) } : { undone: false, note: "nothing to undo" };
+    if (!undone) return { undone: false, note: "nothing to undo" };
+    return {
+      undone: true,
+      kind: "expense",
+      total: formatCents(undone.totalCents),
+      ...(undone.itemsRemoved.length ? { removed_from_fridge: undone.itemsRemoved } : {}),
+    };
   },
 };
 

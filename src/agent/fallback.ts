@@ -110,7 +110,9 @@ export function describeToolResult(name: string, r: Record<string, any>): string
   switch (name) {
     case "undo_last":
       if (!r.undone) return "There's nothing of yours to undo.";
-      return r.kind === "toss" ? `Undone: the ${r.item} is back in the fridge list.` : `Undone: the ${r.total} expense is removed.`;
+      if (r.kind === "toss") return `Undone: the ${r.item} is back in the fridge list.`;
+      const removed = (r.removed_from_fridge as string[] | undefined) ?? [];
+      return `Undone: the ${r.total} expense is removed.${removed.length ? ` Also took ${removed.join(", ")} off the fridge list.` : ""}`;
     case "get_balances":
       if (r.sent_privately) return "I sent your balance to you privately.";
       return [`Your balance: ${r.net}.`, ...((r.breakdown as string[]) ?? [])].join("\n");

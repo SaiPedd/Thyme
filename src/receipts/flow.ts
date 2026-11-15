@@ -17,7 +17,7 @@ import { memberByName, type Member } from "../domain/household";
 import { addItem } from "../domain/inventory";
 import { formatCents, parseCents } from "../domain/money";
 import type { Draft } from "../privacy/projection";
-import { allocate, type CheckedReceipt, type ReceiptLine } from "./receipt";
+import { allocate, lookupPhrase, type CheckedReceipt, type ReceiptLine } from "./receipt";
 
 export const RECEIPT_TTL_MS = 60 * 60 * 1000;
 
@@ -146,18 +146,21 @@ export function parseReceiptReply(raw: string, members: Member[], senderId: numb
     matched = true;
   }
 
-  // Item owners: "2 is mine", "3 and 4 are Sam's", "5 is me and Jordan's", "2 is shared".
+  // Item owners: "2 is mine", "3 and 4 are Sam's", "5 is me and Jordan's", "2 is shared",
+  // "1 is shared between me and Jordan" (exactly them), "1 is shared with Sam" (sender + Sam).
   const assignRe = new RegExp(
-    String.raw`(?:items?\s+)?(${NUM_LIST})\s+(?:is|are|was|were|=|goes to|go to|for)\s+(?:just\s+|only\s+|all\s+)?(?:split\s+(?:between|with)\s+)?(shared|everyone'?s?|for everyone|(?:for\s+)?${NAMES})`,
+    String.raw`(?:items?\s+)?(${NUM_LIST})\s+(?:is|are|was|were|=|goes to|go to|for)\s+(?:just\s+|only\s+|all\s+)?(?:(?:shared|split)\s+(between|with|among|amongst|by)\s+(?:just\s+|only\s+)?)?(shared|everyone'?s?|for everyone|(?:for\s+)?${NAMES})`,
     "gi",
   );
+  let rest = text; // the message minus item assignments, so "1 is split between me and Sam" doesn't re-split the rest
   for (const m of text.matchAll(assignRe)) {
-    const who = m[2]!.replace(/^for\s+/i, "");
+    rest = rest.replace(m[0], " ");
+    const who = m[3]!.replace(/^for\s+/i, "");
     let owners: number[] | null = null;
-    if (!EVERYONE.test(m[2]!)) {
+    if (!EVERYONE.test(m[3]!)) {
       const r = resolveList(members, senderId, who);
       if ("unknown" in r) return { ...out, error: unknownWho(members, r.unknown) };
-      owners = r.ids;
+      owners = m[2]?.toLowerCase() === "with" ? [...new Set([senderId, ...r.ids])] : r.ids;
     }
     for (const n of m[1]!.match(/\d+/g) ?? []) out.assign.push({ index: Number(n), owners });
     matched = true;
@@ -165,12 +168,12 @@ export function parseReceiptReply(raw: string, members: Member[], senderId: numb
 
   // Who shares the rest: "split with Sam only" (sender + Sam), "split between Sam and Jordan" (exactly them),
   // "just me and Sam", "split evenly" / "split with everyone" (back to the whole house).
-  if (/\bsplit\s+(?:it\s+)?(?:evenly|equally|with everyone|between everyone|among everyone)\b/i.test(text)) {
+  if (/\bsplit\s+(?:it\s+)?(?:evenly|equally|with everyone|between everyone|among everyone)\b/i.test(rest)) {
     out.splitAmong = null;
     matched = true;
   } else {
-    const splitWith = text.match(new RegExp(String.raw`\bsplit\s+(?:it\s+|this\s+|the rest\s+)?(with|between|among|amongst)\s+(?:just\s+|only\s+)?(${NAMES})`, "i"));
-    const justUs = text.match(new RegExp(String.raw`(?:^|[,\s])(?:just|only)\s+(me\s+and\s+${NAMES}|${NAME}\s+and\s+me)\b`, "i"));
+    const splitWith = rest.match(new RegExp(String.raw`\bsplit\s+(?:it\s+|this\s+|the rest\s+)?(with|between|among|amongst)\s+(?:just\s+|only\s+)?(${NAMES})`, "i"));
+    const justUs = rest.match(new RegExp(String.raw`(?:^|[,\s])(?:just|only)\s+(me\s+and\s+${NAMES}|${NAME}\s+and\s+me)\b`, "i"));
     // "with Sam" includes the sender; "between Sam and Jordan" and "just me and Sam" are exactly those people.
     const includeSender = splitWith?.[1]!.toLowerCase() === "with";
     const names = splitWith?.[2] ?? justUs?.[1];
@@ -201,7 +204,7 @@ export function receiptSummary(p: PendingReceipt, members: Member[]): string {
   const name = (id: number) => members.find((m) => m.id === id)?.name ?? "someone";
   const lines = [`Got ${p.store ? `the ${p.store}` : "your"} receipt:`];
   const who = (ids: number[]) => (ids.length === 1 ? `just ${name(ids[0]!)}'s` : list(ids.map(name)));
-  const note = (it: ReceiptLine) => (it.inferred ? " (blurry, worked out from the total)" : it.unclear ? ` (${it.unclear} lines I couldn't read)` : "");
+  const note = (it: ReceiptLine) => (it.couponCents ? ` (after ${formatCents(it.couponCents)} coupon)` : "") + (it.inferred ? (it.named ? " (price was blurry, worked out from the total)" : " (blurry, worked out from the total)") : it.unclear ? ` (${it.unclear} lines I couldn't read)` : "");
   p.items.forEach((it, i) => lines.push(`${i + 1}. ${it.name} ${formatCents(it.cents)}${it.owners?.length ? ` (${who(it.owners)})` : ""}${note(it)}`));
   const extras = [
     ...(p.discountCents ? [`savings -${formatCents(p.discountCents)}`] : []),
@@ -216,8 +219,9 @@ export function receiptSummary(p: PendingReceipt, members: Member[]): string {
   if (p.unreadable) {
     lines.push(`I couldn't read ${p.unreadable} line${p.unreadable === 1 ? "" : "s"}. Is anything missing? You can say "total is $X", or send a clearer photo.`);
   }
-  const inferred = p.items.findIndex((it) => it.inferred);
-  if (inferred >= 0) lines.push(`Line ${inferred + 1} was blurry. What was it? (e.g. "${inferred + 1} was bananas")`);
+  // Only ask when we couldn't read what the line was; a blurry price alone is already worked out.
+  const inferred = p.items.findIndex((it) => (it.inferred && !it.named) || it.unnamed);
+  if (inferred >= 0) lines.push(`I couldn't read line ${inferred + 1}. What was it? Reply like "${inferred + 1} was yogurt".`);
   const unclear = p.items.find((it) => it.unclear);
   if (unclear) lines.push(`I couldn't read ${unclear.unclear} lines, so they're counted as shared "other groceries" unless you tell me what they were.`);
   const assigned = p.items.some((it) => it.owners?.length);
@@ -249,15 +253,37 @@ function renameBlurry(p: PendingReceipt, text: string, members: Member[], sender
   const t = text.trim().replace(/[.!]+$/, "").toLowerCase();
   const m = /^(?:(?:item|line)\s*|#)?(\d{1,2})\s+(?:is|was)\s+(?:a |an |the )?(.+)$/.exec(t) ?? /^(?:it|that|the blurry one|the missing one)\s+(?:is|was)\s+(?:a |an |the )?(.+)$/.exec(t);
   if (!m) return null;
-  const index = m.length === 3 && /^\d/.test(m[1]!) ? Number(m[1]) - 1 : p.items.findIndex((it) => it.inferred || it.unclear);
+  const index = m.length === 3 && /^\d/.test(m[1]!) ? Number(m[1]) - 1 : p.items.findIndex((it) => it.inferred || it.unclear || it.unnamed);
   const name = (m.length === 3 && /^\d/.test(m[1]!) ? m[2] : m[1])!.trim();
   const line = p.items[index];
-  if (!line || !(line.inferred || line.unclear)) return null;
+  if (!line || !(line.inferred || line.unclear || line.unnamed)) return null;
+  if (/^\$?[\d.,\s]+$/.test(name)) return null; // a price, not a name
   if (/^(mine|shared|everyone'?s?|for everyone)$/.test(name) || resolve(members, senderId, name.split(/\s+/)[0]!) !== null) return null;
   line.name = name.slice(0, 60);
   line.inferred = false;
   line.unclear = undefined;
+  line.unnamed = false;
   line.named = true;
+  return index;
+}
+
+/**
+ * "3 was 6.49" / "3 is $6.49" / "item 3 costs 6": corrects one line's price, then re-checks the sum
+ * against the printed total.
+ */
+function setPrice(p: PendingReceipt, text: string): number | null {
+  const t = text.trim().replace(/[.!]+$/, "").toLowerCase();
+  const m = /^(?:(?:item|line)\s*|#)?(\d{1,2})\s+(?:is|was|=|costs?|cost|should be|is actually|was actually)\s+(\$?\s?\d[\d,]*(?:\.\d{1,2})?)$/.exec(t);
+  if (!m) return null;
+  const index = Number(m[1]) - 1;
+  const line = p.items[index];
+  const cents = parseCents(m[2]!);
+  if (!line || !cents) return null;
+  line.cents = cents;
+  line.inferred = false;
+  const itemsCents = p.items.reduce((s, i) => s + i.cents, 0);
+  p.diffCents = itemsCents - p.discountCents + p.taxCents - p.totalCents;
+  p.balanced = p.totalCents > 0 && Math.abs(p.diffCents) <= 1;
   return index;
 }
 
@@ -265,7 +291,7 @@ function renameBlurry(p: PendingReceipt, text: string, members: Member[], sender
 export function handleReceiptReply(ctx: ReceiptContext, text: string): string | null {
   const p = getPendingReceipt(ctx.db, ctx.member.id);
   if (!p) return null;
-  if (renameBlurry(p, text, ctx.members, ctx.member.id) !== null) {
+  if (setPrice(p, text) !== null || renameBlurry(p, text, ctx.members, ctx.member.id) !== null) {
     p.at = now().toISOString();
     savePendingReceipt(ctx.db, p);
     return receiptSummary(p, ctx.members);
@@ -330,9 +356,10 @@ function commitReceipt(ctx: ReceiptContext, p: PendingReceipt, allowDuplicate: b
 
   let added = 0;
   const skipped: string[] = [];
+  const unknown: string[] = []; // food we couldn't match to a USDA FoodKeeper entry, so no safe expiry date
   for (const it of p.items) {
     // Lumped or still-unnamed blurry lines are money only: we don't know what food they were.
-    if (it.unclear || (it.inferred && !it.named)) continue;
+    if (it.unclear || it.unnamed || (it.inferred && !it.named)) continue;
     if (NOT_FOOD.test(it.name)) {
       skipped.push(it.name);
       continue;
@@ -346,9 +373,11 @@ function commitReceipt(ctx: ReceiptContext, p: PendingReceipt, allowDuplicate: b
       state: "raw",
       priceCents: it.cents,
       costSource: "receipt",
+      expenseId: expense.id,
+      lookupName: lookupPhrase(it.name),
     });
     if (r.ok) added++;
-    else skipped.push(it.name);
+    else unknown.push(it.name);
   }
 
   const payer = name(expense.buyerId);
@@ -370,6 +399,7 @@ function commitReceipt(ctx: ReceiptContext, p: PendingReceipt, allowDuplicate: b
     `${payer}'s own share is ${formatCents(payerShare)} (already paid).`,
     added ? `Added ${added} item${added === 1 ? "" : "s"} to the fridge list with their receipt prices.` : "",
     skipped.length ? `Not added to the fridge (not food): ${skipped.join(", ")}.` : "",
+    unknown.length ? `Not added to the fridge (I don't know how long ${unknown.length === 1 ? "it keeps" : "they keep"}): ${unknown.join(", ")}. Tell me what ${unknown.length === 1 ? "it is" : "they are"} to add ${unknown.length === 1 ? "it" : "them"}.` : "",
     `Reply "undo" to remove the expense.`,
   ]
     .filter(Boolean)

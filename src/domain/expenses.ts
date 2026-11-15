@@ -83,8 +83,11 @@ export function recordExpense(
 /** Expenses this member can undo: ones they logged (older rows without a logger: ones they paid for). */
 export const LOGGED_BY = "COALESCE(logged_by_member_id, buyer_member_id)";
 
-/** Undo the most recent active expense logged by this member. Returns it, or null if none. */
-export function undoLastExpense(db: Database, householdId: number, memberId: number): { id: number; totalCents: number } | null {
+/**
+ * Undo the most recent active expense logged by this member. Returns it, or null if none.
+ * A receipt's fridge items go too, unless someone already used or tossed them (that history stays).
+ */
+export function undoLastExpense(db: Database, householdId: number, memberId: number): { id: number; totalCents: number; itemsRemoved: string[] } | null {
   const last = db
     .query<{ id: number; total_cents: number }, [number, number]>(
       `SELECT id, total_cents FROM expenses
@@ -94,11 +97,21 @@ export function undoLastExpense(db: Database, householdId: number, memberId: num
     .get(householdId, memberId);
   if (!last) return null;
   const at = now().toISOString();
+  const items = db
+    .query<{ id: number; name: string }, [number]>(
+      "SELECT id, name FROM items WHERE expense_id = ? AND status = 'fresh' AND id NOT IN (SELECT item_id FROM ledger WHERE item_id IS NOT NULL)",
+    )
+    .all(last.id);
   db.transaction(() => {
     db.run("UPDATE expenses SET undone_at = ? WHERE id = ?", [at, last.id]);
     db.run("UPDATE balance_entries SET undone_at = ? WHERE source = 'expense' AND source_id = ?", [at, last.id]);
+    for (const it of items) {
+      db.run("DELETE FROM nudges WHERE item_id = ?", [it.id]);
+      db.run("DELETE FROM claims WHERE item_id = ?", [it.id]);
+      db.run("DELETE FROM items WHERE id = ?", [it.id]);
+    }
   })();
-  return { id: last.id, totalCents: last.total_cents };
+  return { id: last.id, totalCents: last.total_cents, itemsRemoved: items.map((i) => i.name) };
 }
 
 export interface BalanceLine {

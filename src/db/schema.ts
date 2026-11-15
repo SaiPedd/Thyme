@@ -204,4 +204,8 @@ ALTER TABLE members ADD COLUMN named INTEGER NOT NULL DEFAULT 1;
   `
 ALTER TABLE expenses ADD COLUMN logged_by_member_id INTEGER REFERENCES members(id);
 `,
+  // 5: fridge items added from a receipt remember its expense, so undoing the expense removes them too.
+  `
+ALTER TABLE items ADD COLUMN expense_id INTEGER REFERENCES expenses(id);
+`,
 ];

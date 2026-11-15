@@ -94,11 +94,33 @@ describe("checking the math", () => {
     expect(checkReceipt({ ...TJ, total: "20.15" })).toMatchObject({ balanced: false, diffCents: -5 });
   });
 
-  test("coupon lines count as discounts, unless a savings total is printed", () => {
+  test("a coupon comes off the item printed right above it, even if a savings total is printed", () => {
     const withCoupon = { ...TJ, items: [...TJ.items, { name: "coupon", price: "-1.00" }], total: "19.10" };
-    expect(checkReceipt(withCoupon)).toMatchObject({ discountCents: 100, balanced: true, items: expect.any(Array) });
-    expect(checkReceipt(withCoupon).items).toHaveLength(4);
-    expect(checkReceipt({ ...withCoupon, discounts: "1.00" })).toMatchObject({ discountCents: 100, balanced: true });
+    const r = checkReceipt(withCoupon);
+    expect(r).toMatchObject({ discountCents: 0, balanced: true });
+    expect(r.items).toHaveLength(4);
+    expect(r.items[3]).toMatchObject({ name: "eggs", cents: 349, couponCents: 100 });
+    expect(checkReceipt({ ...withCoupon, discounts: "1.00" })).toMatchObject({ discountCents: 0, balanced: true });
+  });
+
+  test("a coupon naming an item comes off that item, wherever it's printed", () => {
+    const r = checkReceipt({ ...TJ, items: [...TJ.items, { name: "COUPON CHICKEN", price: "-2.00" }], total: "18.10" });
+    expect(r.items[1]).toMatchObject({ name: "chicken thighs", cents: 699, couponCents: 200 });
+    expect(r.items[3]).toMatchObject({ name: "eggs", cents: 449 });
+    expect(r.balanced).toBe(true);
+  });
+
+  test("a coupon with no item to attach to comes off the whole receipt", () => {
+    const r = checkReceipt({ ...TJ, items: [{ name: "store coupon", price: "-1.00" }, ...TJ.items], total: "19.10" });
+    expect(r).toMatchObject({ discountCents: 100, balanced: true });
+    expect(r.items.every((i) => !i.couponCents)).toBe(true);
+  });
+
+  test("the coupon's savings go to whoever owns that item", () => {
+    const r = checkReceipt({ ...TJ, items: [...TJ.items, { name: "COUPON CHICKEN", price: "-2.00" }], total: "18.10" });
+    r.items[1]!.owners = [1]; // Alex's chicken
+    const alex = allocate(r.items, r.totalCents).find((a) => a.memberIds.join() === "1")!;
+    expect(alex.amountCents).toBe(699 + Math.floor((84 * 699) / 1726)); // net of the coupon, plus its share of tax
   });
 
   test("card numbers and payment lines never survive", () => {
@@ -145,6 +167,19 @@ describe("replies: who paid, whose items", () => {
     expect(parseReceiptReply("2 is shared", members, 1)).toMatchObject({ assign: [{ index: 2, owners: null }] });
     expect(parseReceiptReply("5 is me and Sam's", members, 1)).toMatchObject({ assign: [{ index: 5, owners: [1, 2] }] });
     expect(parseReceiptReply("2 is mine and Sam paid", members, 1)).toMatchObject({ buyerId: 2, assign: [{ index: 2, owners: [1] }] });
+  });
+
+  test("an item shared by only some roommates doesn't change who shares the rest", () => {
+    const r = parseReceiptReply("sam paid, 2 is mine, 3 is jordan's, 1 is shared between me and jordan only", members, 1);
+    expect(r).toMatchObject({
+      buyerId: 2,
+      assign: [{ index: 2, owners: [1] }, { index: 3, owners: [3] }, { index: 1, owners: [1, 3] }],
+    });
+    expect(r?.splitAmong).toBeUndefined();
+    expect(parseReceiptReply("1 is split between me and Sam", members, 1)).toMatchObject({ assign: [{ index: 1, owners: [1, 2] }] });
+    expect(parseReceiptReply("1 is split between me and Sam", members, 1)?.splitAmong).toBeUndefined();
+    expect(parseReceiptReply("4 is shared with Jordan", members, 1)).toMatchObject({ assign: [{ index: 4, owners: [1, 3] }] });
+    expect(parseReceiptReply("1 is shared between me and joran only", members, 1)?.error).toContain("joran");
   });
 
   test("parses who shares the rest of the receipt", () => {
@@ -220,8 +255,18 @@ describe("receipt flow through the router", () => {
     expect(items.find((i) => i.name === "chicken thighs")).toMatchObject({ cost_cents: 899, owner_member_id: 3, buyer_member_id: 2 });
     expect(getPendingReceipt(db, 1)).toBeNull();
 
+    // Someone already ate the bananas: that stays. The rest of the receipt's food leaves the fridge list on undo.
+    db.run("UPDATE items SET status = 'used' WHERE name = 'bananas' AND cost_source = 'receipt'");
+
     // The person who sent the receipt can undo it, even though Sam paid.
-    expect(await say(PHONES[0]!, "undo")).toContain("$20.10 expense is removed");
+    const undone = await say(PHONES[0]!, "undo");
+    expect(undone).toContain("$20.10 expense is removed");
+    expect(undone).toContain("Also took baby spinach, chicken thighs, eggs off the fridge list.");
+    expect(db.query<{ name: string }, []>("SELECT name FROM items WHERE cost_source = 'receipt'").all().map((i) => i.name)).toEqual(["bananas"]);
+
+    // Resending the same photo is now a clean redo, not a duplicate.
+    await say(PHONES[0]!, "", true);
+    expect(await say(PHONES[0]!, "yes")).toContain("Saved: $20.10");
   });
 
   test("non-food lines count toward the bill but stay out of the fridge; store numbers are dropped", async () => {
@@ -318,6 +363,7 @@ describe("receipt flow through the router", () => {
 
 describe("blurry lines, no size limit, DM confirmations", () => {
   const blur = (i: number) => ({ ...TJ, items: TJ.items.map((it, j) => (j === i ? { name: it.name, price: "", readable: false } : it)) });
+  const blurAll = (i: number) => ({ ...TJ, items: TJ.items.map((it, j) => (j === i ? { name: "", price: "", readable: false } : it)) });
 
   test("one blurry line: its price is worked out from the total, never guessed", () => {
     const r = checkReceipt({ ...blur(1), items: blur(1).items.map((it, j) => (j === 1 ? { ...it, price: "7.00" } : it)) });
@@ -343,12 +389,33 @@ describe("blurry lines, no size limit, DM confirmations", () => {
     expect(img.bytes.byteLength).toBe(big.byteLength);
   });
 
-  test("router: blurry line shown, '2 was chicken thighs' names it, then it goes in the fridge", async () => {
+  test("router: only the price was blurry: no question, and it still goes in the fridge", async () => {
     setNow(T0);
     const { db, say } = await app(async () => blur(1));
     const shown = await say(PHONES[0]!, "", true);
-    expect(shown).toContain("2. chicken thighs $8.99 (blurry, worked out from the total)");
-    expect(shown).toContain("Line 2 was blurry. What was it?");
+    expect(shown).toContain("2. chicken thighs $8.99 (price was blurry, worked out from the total)");
+    expect(shown).not.toContain("What was it?");
+    expect(await say(PHONES[0]!, "yes")).toContain("Added 4 items");
+    expect(db.query<{ name: string }, []>("SELECT name FROM items WHERE cost_source = 'receipt'").all().map((i) => i.name)).toContain("chicken thighs");
+  });
+
+  test("router: '2 was 9.99' corrects a price and flags that it no longer matches the total", async () => {
+    setNow(T0);
+    const { say } = await app(async () => blur(1));
+    await say(PHONES[0]!, "", true);
+    const fixed = await say(PHONES[0]!, "2 was 9.99");
+    expect(fixed).toContain("2. chicken thighs $9.99\n");
+    expect(fixed).toContain("the lines add up to $21.10, but the total says $20.10");
+    expect(await say(PHONES[0]!, "2 is $8.99")).not.toContain("Heads up");
+    expect(await say(PHONES[0]!, "2 was 9")).toContain("2. chicken thighs $9.00");
+  });
+
+  test("router: name and price blurry: asks, '2 was chicken thighs' names it, then it goes in the fridge", async () => {
+    setNow(T0);
+    const { db, say } = await app(async () => blurAll(1));
+    const shown = await say(PHONES[0]!, "", true);
+    expect(shown).toContain("2. unreadable item $8.99 (blurry, worked out from the total)");
+    expect(shown).toContain("I couldn't read line 2. What was it?");
     expect(await say(PHONES[0]!, "2 was chicken thighs")).toContain("2. chicken thighs $8.99\n");
     expect(await say(PHONES[0]!, "yes")).toContain("Added 4 items");
     expect(db.query<{ name: string }, []>("SELECT name FROM items WHERE cost_source = 'receipt'").all().map((i) => i.name)).toContain("chicken thighs");
@@ -356,7 +423,7 @@ describe("blurry lines, no size limit, DM confirmations", () => {
 
   test("an unnamed blurry line counts in the bill but stays out of the fridge; '2 is Sam's' is still an owner change", async () => {
     setNow(T0);
-    const { db, say } = await app(async () => blur(1));
+    const { db, say } = await app(async () => blurAll(1));
     await say(PHONES[0]!, "", true);
     expect(await say(PHONES[0]!, "2 is Sam's")).toContain("(just Sam's)");
     expect(await say(PHONES[0]!, "yes")).toContain("Added 3 items");
@@ -375,5 +442,74 @@ describe("blurry lines, no size limit, DM confirmations", () => {
     const group = adapter.sent.filter((s) => s.destination.kind === "group").map((s) => s.text).join("\n");
     expect(group).toContain("Jordan logged a Trader Joe's receipt: $20.10 paid by Jordan.");
     expect(group).toContain("Alex owes Jordan");
+  });
+});
+
+describe("receipt names -> USDA FoodKeeper", () => {
+  test("sizes, counts, and marketing words are dropped before the lookup", async () => {
+    const { lookupPhrase } = await import("../src/receipts/receipt");
+    expect(lookupPhrase("organic baby spinach 5oz")).toBe("baby spinach");
+    expect(lookupPhrase("chicken thigh boneless")).toBe("chicken thigh");
+    expect(lookupPhrase("milk 2% half gal")).toBe("milk");
+    expect(lookupPhrase("bananas 2 @ 0.29")).toBe("bananas");
+    expect(lookupPhrase("large brown eggs 12ct")).toBe("eggs");
+    expect(lookupPhrase("ground beef 85/15")).toBe("ground beef");
+  });
+
+  test("receipt chicken thighs get chicken's 1-day fridge life, not lamb's", async () => {
+    setNow(T0);
+    const { db, say } = await app(async () => ({ ...TJ, items: TJ.items.map((it) => (it.name === "chicken thighs" ? { ...it, name: "chicken thigh boneless" } : it)) }));
+    await say(PHONES[0]!, "", true);
+    await say(PHONES[0]!, "yes");
+    const row = db
+      .query<{ name: string }, []>("SELECT s.name FROM items i JOIN shelf_life s ON s.id = i.shelf_life_id WHERE i.name = 'chicken thigh boneless'")
+      .get();
+    expect(row?.name.trim()).toBe("Chicken parts");
+  });
+});
+
+describe("who can confirm, and who's in the split", () => {
+  test("only the person who sent the receipt can confirm it: Sam's 'yes' doesn't save Alex's", async () => {
+    setNow(T0);
+    const { db, say } = await app(async () => TJ);
+    await say(PHONES[0]!, "", true);
+    const fromSam = await say(PHONES[1]!, "yes");
+    expect(fromSam).not.toContain("Saved");
+    expect(db.query("SELECT COUNT(*) AS n FROM expenses").get()).toEqual({ n: 0 });
+    expect(getPendingReceipt(db, 1)).not.toBeNull(); // still waiting on Alex
+    expect(await say(PHONES[0]!, "yes")).toContain("Saved: $20.10 paid by Alex.");
+  });
+
+  test("a roommate who hasn't said their name yet is still in the split", async () => {
+    setNow(T0);
+    const { db, say } = await app(async () => TJ);
+    db.run("UPDATE members SET name = 'Roommate 0103', named = 0 WHERE id = 3");
+    await say(PHONES[0]!, "", true);
+    const saved = await say(PHONES[0]!, "yes");
+    expect(saved).toContain("Roommate 0103 owes Alex $6.70");
+    const shares = db.query<{ member_id: number; share_cents: number }, []>("SELECT member_id, share_cents FROM expense_shares ORDER BY member_id").all();
+    expect(shares.map((s) => s.member_id)).toEqual([1, 2, 3]);
+    expect(shares.reduce((s, x) => s + x.share_cents, 0)).toBe(2010);
+  });
+});
+
+describe("the model's placeholder names", () => {
+  test("'blurred item' with a readable price: asks what it was, and '2 was hummus' names it", async () => {
+    setNow(T0);
+    const { db, say } = await app(async () => ({ ...TJ, items: TJ.items.map((it, j) => (j === 1 ? { name: "blurred item", price: "8.99" } : it)) }));
+    const shown = await say(PHONES[0]!, "", true);
+    expect(shown).toContain("2. unreadable item $8.99");
+    expect(shown).toContain("I couldn't read line 2. What was it?");
+    expect(await say(PHONES[0]!, "2 was hummus")).toContain("2. hummus $8.99\n");
+    expect(await say(PHONES[0]!, "yes")).toContain("Added 4 items");
+    expect(db.query<{ name: string }, []>("SELECT name FROM items WHERE cost_source = 'receipt'").all().map((i) => i.name)).toContain("hummus");
+  });
+
+  test("a fully blurry line the model calls 'unreadable item' still gets asked about", async () => {
+    setNow(T0);
+    const { say } = await app(async () => ({ ...TJ, items: TJ.items.map((it, j) => (j === 1 ? { name: "unreadable item", price: "", readable: false } : it)) }));
+    const shown = await say(PHONES[0]!, "", true);
+    expect(shown).toContain("2. unreadable item $8.99 (blurry, worked out from the total)");
+    expect(shown).toContain("I couldn't read line 2. What was it?");
   });
 });

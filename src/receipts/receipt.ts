@@ -188,8 +188,12 @@ export interface ReceiptLine {
   inferred?: boolean;
   /** Several blurry lines lumped into one shared "other groceries" line: how many. */
   unclear?: number;
-  /** The user told us what a blurry line was. */
+  /** We know what a blurry line was: its name was readable (only the price was blurry), or the user told us. */
   named?: boolean;
+  /** The price was readable but the name wasn't ("blurred item"): ask what it was. */
+  unnamed?: boolean;
+  /** A coupon already taken off this line's price (cents), so whoever owns the item gets the savings. */
+  couponCents?: number;
   /** Who this line is for: one person (theirs), a few (shared by them), or null (the whole split). */
   owners: number[] | null;
 }
@@ -219,6 +223,44 @@ export function cleanName(name: string): string {
   return name.replace(/[*xX#]{2,}\d*/g, " ").replace(/#\s*\d+/g, " ").replace(/\d{4,}/g, " ").replace(/\s+/g, " ").trim();
 }
 
+/** Receipt words that say nothing about what the food is (and throw off the FoodKeeper search). */
+const NOISE = /\b(?:organic|org|natural|fresh|large|lg|medium|med|small|sm|jumbo|xl|brown|boneless|bnls|skinless|sknls|original|orig|classic|whole|half|family|value|pack|pk|count|ct|gal|gallon|oz|lb|lbs|fl|qt|pt|ea|each|loose|bunch|bag|box|can|jar|btl|bottle|reduced|low|fat|free|lowfat|nonfat|unsweetened|plain)\b/g;
+
+/**
+ * What to look up in USDA FoodKeeper for a receipt line: "organic baby spinach 5oz" -> "baby spinach",
+ * "milk 2% half gal" -> "milk", "chicken thigh boneless" -> "chicken thigh". The fridge list keeps the full name.
+ */
+export function lookupPhrase(name: string): string {
+  const t = name
+    .toLowerCase()
+    .replace(/@\s*\$?\d+(?:\.\d+)?/g, " ") // "2 @ 0.29"
+    .replace(/\d+(?:[./]\d+)?\s*(?:%|oz|lbs?|ct|pk|gal|qt|pt|ml|l|kg|g)?\b/g, " ") // sizes, counts, 85/15, 2%
+    .replace(/[%/&.,'()-]/g, " ")
+    .replace(NOISE, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  return t || name;
+}
+
+/** Names the model writes when it can't read a line's name ("blurred item", "unreadable", "unknown product"). */
+const PLACEHOLDER_NAME = /^(?:blurr?(?:ed|y)|unreadable|illegible|unknown|smudged|unclear|obscured|faded|cut off|missing|\?+)(?:\s+(?:item|line|product|text|name))?$/i;
+
+const COUPON_WORDS = /\b(?:coupon|cpn|discount|disc|savings?|save|off|promo|sale|mfr|manufacturer|store|digital|instant|tpr|member|club|deal|you|saved)\b/g;
+
+/**
+ * Which item a coupon line belongs to: the item it names ("COUPON SALMON" -> salmon fillet), else the item
+ * printed right above it. -1 when neither (it then comes off the whole receipt).
+ */
+function couponTarget(items: ReceiptLine[], couponName: string, prevIndex: number): number {
+  const words = (lookupPhrase(couponName).replace(COUPON_WORDS, " ").match(/[a-z]{3,}/g) ?? []).map((w) => w.replace(/s$/, ""));
+  if (words.length) {
+    const hits = items.map((it, i) => ({ i, it })).filter(({ it }) => words.some((w) => new RegExp(String.raw`\b${w}`).test(it.name.toLowerCase())));
+    if (hits.length === 1) return hits[0]!.i;
+    if (hits.length > 1) return -1; // ambiguous: don't guess
+  }
+  return prevIndex;
+}
+
 const isNegative = (s: string) => /^\s*-|-\s*$|\(\s*\$?\d/.test(s);
 
 export function checkReceipt(raw: RawReceipt): CheckedReceipt {
@@ -228,7 +270,10 @@ export function checkReceipt(raw: RawReceipt): CheckedReceipt {
   let dropped = 0;
   /** Blurry lines, with where they sat in the list so a filled-in line keeps its place. */
   const blurry: { name: string; at: number }[] = [];
+  let prevItem = -1; // the item printed right before this line (coupons usually follow their item)
   for (const line of raw.items) {
+    const lastItem = prevItem;
+    prevItem = -1;
     if (NOT_AN_ITEM.test(line.name)) {
       dropped++;
       continue;
@@ -245,6 +290,14 @@ export function checkReceipt(raw: RawReceipt): CheckedReceipt {
     if (isNegative(line.price)) {
       // A coupon line. If the receipt also printed a savings total, that total already counts it.
       if (!printedDiscounts) discountCents += cents;
+      // Take it off the item it's for, so the owner of that item gets the savings (not the whole house).
+      const item = items[couponTarget(items, line.name, lastItem)];
+      if (item) {
+        const off = Math.min(cents, item.cents);
+        item.cents -= off;
+        item.couponCents = (item.couponCents ?? 0) + off;
+        discountCents -= off;
+      }
       continue;
     }
     const name = cleanName(line.name);
@@ -252,7 +305,9 @@ export function checkReceipt(raw: RawReceipt): CheckedReceipt {
       dropped++;
       continue;
     }
-    items.push({ name, cents, owners: null });
+    if (PLACEHOLDER_NAME.test(name)) items.push({ name: "unreadable item", cents, owners: null, unnamed: true });
+    else items.push({ name, cents, owners: null });
+    prevItem = items.length - 1;
   }
   const taxCents = raw.tax ? (parseCents(raw.tax) ?? 0) : 0;
   const totalCents = parseCents(raw.total) ?? 0;
@@ -262,7 +317,9 @@ export function checkReceipt(raw: RawReceipt): CheckedReceipt {
   const missing = totalCents - taxCents + discountCents - items.reduce((s, i) => s + i.cents, 0);
   if (totalCents > 0 && missing > 0 && unreadable >= 1 && unreadable <= MAX_FILLED_LINES) {
     if (unreadable === 1) {
-      items.splice(blurry[0]?.at ?? items.length, 0, { name: blurry[0]?.name || "unreadable item", cents: missing, owners: null, inferred: true });
+      const read = blurry[0]?.name ? cleanName(blurry[0].name) : "";
+      const name = PLACEHOLDER_NAME.test(read) ? "" : read;
+      items.splice(blurry[0]?.at ?? items.length, 0, { name: name || "unreadable item", cents: missing, owners: null, inferred: true, named: !!name });
     }
     else items.push({ name: "other groceries", cents: missing, owners: null, unclear: unreadable });
     unreadable = 0;

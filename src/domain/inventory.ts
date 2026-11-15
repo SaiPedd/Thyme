@@ -38,6 +38,10 @@ export interface AddItemInput {
   priceCents?: number | null;
   /** Where a given price came from (default "user"). */
   costSource?: "receipt" | "user";
+  /** The receipt expense this came from (undoing it removes the item). */
+  expenseId?: number;
+  /** What to search FoodKeeper for, when the shown name is noisy (receipt lines). Default: name. */
+  lookupName?: string;
 }
 
 export type AddItemResult =
@@ -50,7 +54,7 @@ const foodLabel = (r: ShelfLifeRow) => (r.subtitle ? `${r.name.trim()} (${r.subt
 export function addItem(db: Database, input: AddItemInput): AddItemResult {
   let row = input.shelfLifeId !== undefined ? getShelfLife(db, input.shelfLifeId) : null;
   if (!row) {
-    const pick = pickShelfLife(db, input.name, input.state);
+    const pick = pickShelfLife(db, input.lookupName ?? input.name, input.state);
     if (!pick) return { ok: false, reason: "no_match" };
     if ("ambiguous" in pick) return { ok: false, reason: "ambiguous", options: pick.ambiguous };
     row = pick.row;
@@ -61,9 +65,9 @@ export function addItem(db: Database, input: AddItemInput): AddItemResult {
   const estimate = input.priceCents == null ? estimatePriceCents(input.name) : null;
   const cost = input.priceCents ?? estimate;
   const item = db
-    .query<Item, [number, string, number, string, number | null, number, number | null, string | null, string, string | null]>(
-      `INSERT INTO items (household_id, name, shelf_life_id, storage, owner_member_id, buyer_member_id, qty, cost_cents, cost_source, added_at, expires_at, status)
-       VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, 'fresh') RETURNING *`,
+    .query<Item, [number, string, number, string, number | null, number, number | null, string | null, string, string | null, number | null]>(
+      `INSERT INTO items (household_id, name, shelf_life_id, storage, owner_member_id, buyer_member_id, qty, cost_cents, cost_source, added_at, expires_at, status, expense_id)
+       VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, 'fresh', ?) RETURNING *`,
     )
     .get(
       input.householdId,
@@ -76,6 +80,7 @@ export function addItem(db: Database, input: AddItemInput): AddItemResult {
       cost === null ? null : input.priceCents != null ? (input.costSource ?? "user") : "estimate",
       at.toISOString(),
       expires?.toISOString() ?? null,
+      input.expenseId ?? null,
     )!;
   return { ok: true, item, food: foodLabel(row), note: expires ? null : shelfLifeNote(row, storage) };
 }

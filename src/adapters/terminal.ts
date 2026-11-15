@@ -46,15 +46,17 @@ export class TerminalAdapter implements Adapter {
     (async () => {
       for await (const raw of console) {
         if (!this.running) break;
-        const line = raw.trim();
+        let line = raw.trim();
         if (!line) continue;
         if (line.startsWith("/as ")) {
-          const name = line.slice(4).trim().toLowerCase();
-          const m = this.members.find((x) => x.name.toLowerCase().startsWith(name));
+          // "/as Sam" switches; "/as Sam, Thyme what do I owe?" switches and then sends the rest.
+          const [, name = "", rest = ""] = /^\/as\s+([^\s,]+)[\s,]*(.*)$/i.exec(line) ?? [];
+          const m = name ? this.members.find((x) => x.name.toLowerCase().startsWith(name.toLowerCase())) : undefined;
           if (m) this.current = m;
           else this.out(`no roommate named ${name}. Roommates: ${this.members.map((x) => x.name).join(", ")}`);
           this.prompt();
-          continue;
+          if (!m || !rest) continue;
+          line = rest;
         }
         if (line === "/group" || line === "/dm") {
           this.inGroup = line === "/group";

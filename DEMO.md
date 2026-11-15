@@ -1,0 +1,88 @@
+# Fridge Squad demo script
+
+About 4 minutes. Rehearse it 3 to 5 times from a fresh seed, and record one clean run as a backup video.
+
+## Before the demo (10 minutes ahead)
+
+1. `bun test`: all tests pass.
+2. Pick the mode:
+   - **Terminal (safe, no phones):** `bun run seed --demo`, then `bun run chat`.
+   - **Live iMessage:** `bun run seed` (no `--demo`), `bun run spike` (Claw connected, photos come through),
+     then `bun run start`. Each roommate texts the group once and tells Thyme their name.
+3. Open a second terminal in the repo for `bun run time-travel` (step 5).
+4. In the terminal, use `~/Desktop/receipt.jpg`. Live, have the same receipt photo on the presenter's phone.
+5. Run the demo during the day: proactive messages wait during quiet hours (10 PM to 8 AM).
+
+In the terminal, a line starting with `/` is a command for the terminal chat (who you are, sending a photo).
+Everything else is a text message. `/as Sam, <message>` switches to Sam and sends the message.
+
+## The script
+
+### 1. Split a grocery receipt (P1)
+Say: "Alex just got back from Trader Joe's. Sam paid, and the chicken is just Alex's."
+
+| Type (as Alex, in the group) | Expect |
+|---|---|
+| `/photo ~/Desktop/receipt.jpg Thyme receipt` | Thyme lists 5 items, tax $0.30, total $23.16. Nothing saved yet. |
+| `Sam paid, 2 is mine` | Updated list: "Paid by Sam", chicken marked "(just Alex's)". |
+| `yes` | Alex owes Sam $13.79, Jordan owes Sam $4.68. 4 items added to the fridge; paper towels left out (not food). |
+
+Say: "The model reads the receipt. Code checks that the items add up to the total and does every split, to the cent."
+
+### 2. Privacy: balances go to DMs
+| Type | Expect |
+|---|---|
+| `/as Sam, Thyme what do I owe?` | In the group: "sent you a DM". In Sam's DM: owed $18.47. |
+
+Say: "The group sees shared splits. Personal balances, allergies, and personal items only go to that person."
+
+### 3. Cook with what's there (P3)
+| Type | Expect |
+|---|---|
+| `Thyme what can I make tonight?` | A recipe using only what's in the fridge (e.g. egg fried rice with the spinach). |
+
+Say: "Code checks every recipe against the current inventory, so it never suggests something you don't have."
+
+### 4. Food is about to spoil (P2)
+In the second terminal:
+```
+bun run time-travel +1d10h
+```
+Within 5 seconds the group gets: "Heads up: the baby spinach expires in 2 days ... Anyone want them?"
+Alex gets a private DM that their chicken is past the USDA date.
+
+Say: "Expiry dates come from the USDA FoodKeeper table, using the conservative end. The model never guesses a date."
+
+| Type | Expect |
+|---|---|
+| `/as Jordan, Thyme I'll take the spinach` | "The baby spinach is yours." The first claim wins; code decides. |
+
+### 5. Waste ledger (P4)
+| Type (as Jordan) | Expect |
+|---|---|
+| `Thyme I tossed the bananas, they went bad` | Logged; the cost of shared waste is split like groceries. |
+| `Thyme how much food have we wasted?` | Items, dollars, pounds, and CO2e (estimates). |
+
+Say: "Shared waste goes into the same balances as groceries, so the house sees what it costs to throw food away."
+
+### Close
+"One group chat. It splits the bill, warns you before food goes bad, cooks with what's left, and keeps score on waste."
+
+## If something goes wrong live
+
+| Problem | Do this |
+|---|---|
+| Receipt split is wrong after `yes` | As the sender: `undo`. That removes the expense and its fridge items. Send the photo again. |
+| Wrong change before `yes` | Send the right one (`2 is shared`, `Alex paid`), or `cancel` and send the photo again. |
+| "I'm having trouble reading receipts right now" | A Gemini hiccup (seen once in rehearsal; the same photo worked a minute later). Send the photo again. |
+| Thyme says "having trouble" | Wait a few seconds and resend. If Gemini is down, the rule-based fallback still handles plain logs, `undo`, and `what do I owe?`. |
+| Reminder doesn't show after time travel | Someone has to message the group first. It also waits during quiet hours. |
+| Anything else | Play the backup video. |
+
+## Known rough edges (stay off these paths on stage)
+
+- The `--demo` seed already has baby spinach, bananas, and chicken, so after the receipt there are two of each and the
+  reminder lists both.
+- You can't reopen a saved receipt to edit it; use `undo` and resend.
+- Bread doesn't match a USDA entry yet, so a receipt's bread isn't added to the fridge (Thyme says so).
+- A typo in a roommate's name gets "I don't know who that is".
