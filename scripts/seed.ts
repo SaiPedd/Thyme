@@ -43,6 +43,8 @@ db.transaction(() => {
   }
   db.run("DELETE FROM state WHERE key LIKE 'intro:%'"); // so the agent introduces itself again
   db.run("DELETE FROM state WHERE key LIKE 'daily:%' OR key = 'clock_offset_ms'"); // back to real time, reminders not yet run
+  // Per-member state (payment info, pending recipes): member ids are reused, so it must not survive a reset.
+  db.run("DELETE FROM state WHERE key LIKE 'pay:%' OR key LIKE 'recipe:%' OR key LIKE 'cook:%'");
   db.run("INSERT INTO households (id, name, chat_id, tz, mode, created_at) VALUES (1, 'Squad House', ?, ?, ?, ?)", [
     process.env.HOUSEHOLD_CHAT_ID?.trim() || null,
     config.householdTz,

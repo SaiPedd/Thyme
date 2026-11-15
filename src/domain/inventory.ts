@@ -173,12 +173,26 @@ export function matchItem<T extends Pick<Item, "name">>(items: T[], phrase: stri
   return best?.item ?? null;
 }
 
-/** An item this phrase names at least as well as `than`, that was marked used/tossed in the last few minutes. */
-export function recentlyChanged(db: Database, householdId: number, status: "used" | "tossed", phrase: string, than: Item, withinMs = 10 * 60_000): Item | null {
+/**
+ * An item this phrase names at least as well as `than`, that was marked used/tossed in the last few
+ * minutes. Only items this member can see (shared, or their own), so it never names someone else's.
+ */
+export function recentlyChanged(
+  db: Database,
+  householdId: number,
+  memberId: number,
+  status: "used" | "tossed",
+  phrase: string,
+  than: Item,
+  withinMs = 10 * 60_000,
+): Item | null {
   const since = new Date(now().getTime() - withinMs).toISOString();
   const recent = db
-    .query<Item, [number, string, string]>("SELECT * FROM items WHERE household_id = ? AND status = ? AND status_at >= ? ORDER BY status_at DESC")
-    .all(householdId, status, since);
+    .query<Item, [number, string, string, number]>(
+      `SELECT * FROM items WHERE household_id = ? AND status = ? AND status_at >= ?
+         AND (owner_member_id IS NULL OR owner_member_id = ?) ORDER BY status_at DESC`,
+    )
+    .all(householdId, status, since, memberId);
   const best = matchItem(recent, phrase);
   return best && matchScore(best.name, phrase) >= matchScore(than.name, phrase) ? best : null;
 }
