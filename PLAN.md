@@ -50,6 +50,8 @@ developed the Gemini Interactions loop (gemini-3.5-flash-lite, function calling,
 - Test: `bun test` and `bun run chat`
 
 ### Phase 2: P1a expense splitting end to end (T+1:30 to 2:00), first demo-able feature
+**Status: DONE.** Split summary posted to the group (explicit who-owes-whom), expenses recorded with
+integer-cent splits, duplicate detection, undo, and balances sent privately by DM.
 - record_expense, undo_last and get_balances tools; the reply always shows the computed result
   and how to fix it.
 - Group: the split summary goes to the group; each person's balance goes to their own DM.
