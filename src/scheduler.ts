@@ -1,8 +1,8 @@
 // Proactive work, ticked every few seconds by index.ts:
-// - send deferred messages (quiet hours) once they're due
+// - send any held (deferred) messages once they're due
 // - once a day at 09:00 household time, remind about food expiring within 48h:
 //   shared items to the group, personal items to the owner's DM; one retry the next morning, then stop.
-// Every message goes through the outbox (quiet hours, caps, budget, privacy projection).
+// Every message goes through the outbox (caps, budget, privacy projection).
 // The wording is fixed here (code owns the facts); a reminder only opens a conversation.
 
 import type { Database } from "bun:sqlite";

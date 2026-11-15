@@ -19,6 +19,7 @@ import {
   isPast,
   itemNote,
   matchItem,
+  recentlyChanged,
   setItemPrice,
   setItemStatus,
   visibleItems,
@@ -375,6 +376,11 @@ function statusTool(name: "use_item" | "log_toss", status: "used" | "tossed", de
     run(input, ctx) {
       const item = findItem(ctx.db, ctx.household.id, ctx.member.id, String(input.item ?? ""));
       if (!item) return { done: false, note: `nothing called "${input.item}" in the fridge list` };
+      // "tossed the spinach" ... "no, I threw it out": don't toss a second, different spinach.
+      const again = recentlyChanged(ctx.db, ctx.household.id, status, String(input.item ?? ""), item);
+      if (again) {
+        return { done: false, already: again.name, status, note: `The ${again.name} was already marked ${status} a moment ago. Only call again if they say it's a different one (the ${item.name}).` };
+      }
       const rescued = status === "used" && isAtRisk(item) && !isPast(item);
       setItemStatus(ctx.db, item.id, status, ctx.member.id);
       // The cost is only shown when someone said what they paid, and never for a personal item in the group.

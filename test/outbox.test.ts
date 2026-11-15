@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { resetClock, setNow } from "../src/clock";
-import { isQuietHour, Outbox, quietUntil } from "../src/outbox";
+import { Outbox } from "../src/outbox";
 import { PrivacyError } from "../src/privacy/projection";
 import { FakeAdapter, quietLog, setupHousehold } from "./helpers";
 
@@ -19,38 +19,23 @@ function make() {
   return { db, adapter, outbox };
 }
 
-describe("quiet hours", () => {
-  test("10 PM to 8 AM is quiet", () => {
-    const q = { start: 22, end: 8 };
-    expect([22, 23, 0, 7].every((h) => isQuietHour(h, q))).toBe(true);
-    expect([8, 12, 21].some((h) => isQuietHour(h, q))).toBe(false);
-  });
-
-  test("quietUntil returns 8 AM local", () => {
-    const until = quietUntil("America/New_York", NIGHT, { start: 22, end: 8 })!;
-    expect(until.toISOString()).toBe("2026-11-15T13:00:00.000Z"); // 08:00 EST
-    expect(quietUntil("America/New_York", AFTERNOON, { start: 22, end: 8 })).toBeNull();
-  });
-
-  test("proactive sends at night are deferred, then flushed in the morning", async () => {
+describe("no quiet hours", () => {
+  test("a proactive send at 11 PM goes out right away", async () => {
     const { adapter, outbox } = make();
     setNow(NIGHT);
-    const [o] = await outbox.send(shared, { kind: "proactive" });
-    expect(o!.status).toBe("deferred");
-    expect(adapter.sent).toHaveLength(0);
-
-    setNow(new Date("2026-11-15T12:59:00Z"));
-    expect(await outbox.flushDue()).toHaveLength(0);
-    setNow(new Date("2026-11-15T13:00:00Z"));
-    expect((await outbox.flushDue())[0]!.status).toBe("accepted");
+    expect((await outbox.send(shared, { kind: "proactive" }))[0]!.status).toBe("accepted");
     expect(adapter.sent[0]!.text).toBe("spinach expires tomorrow");
   });
 
-  test("replies are never held for quiet hours", async () => {
-    const { adapter, outbox } = make();
+  test("a message an older run held back is still sent when due", async () => {
+    const { db, adapter, outbox } = make();
     setNow(NIGHT);
-    expect((await outbox.send(shared, { kind: "reply" }))[0]!.status).toBe("accepted");
-    expect(adapter.sent).toHaveLength(1);
+    db.run(
+      `INSERT INTO sends (id, audience, chat_id, kind, status, not_before, created_at, body) VALUES ('old', 'group', 'chat-1', 'proactive', 'deferred', ?, ?, 'held')`,
+      [NIGHT.toISOString(), NIGHT.toISOString()],
+    );
+    expect((await outbox.flushDue())[0]!.status).toBe("accepted");
+    expect(adapter.sent[0]!.text).toBe("held");
   });
 });
 

@@ -1,6 +1,6 @@
 import { afterEach, beforeAll, describe, expect, test } from "bun:test";
 import type { Database } from "bun:sqlite";
-import { parseIntent } from "../src/agent/fallback";
+import { parseIntent, runFallback } from "../src/agent/fallback";
 import { runTool, type ToolContext } from "../src/agent/tools";
 import { addDays, resetClock, setNow } from "../src/clock";
 import { getShelfLife, importFoodKeeperFile, pickShelfLife } from "../src/domain/foodkeeper";
@@ -164,10 +164,51 @@ describe("inventory tools and privacy", () => {
   });
 });
 
+describe("buy, then ask what's there", () => {
+  test("'I bought ...' then 'what is in my fridge?' lists it with where it's kept", async () => {
+    const db = await withFoodKeeper();
+    setNow(T0);
+    const ctx = ctxFor(db, 0, true);
+    runFallback("I bought spinach and rice", ctx);
+    const reply = runFallback("what is in my fridge?", ctx)!;
+    expect(reply).toContain("- spinach (fridge): expires in");
+    expect(reply).toContain("- rice (pantry):");
+  });
+
+  test("'i just bought ...' is a food log (it was silently ignored before)", () => {
+    expect(parseIntent("i just bought strawberries, bell peppers and greek yogurt")).toEqual({
+      kind: "add",
+      items: [{ name: "strawberries" }, { name: "bell peppers" }, { name: "greek yogurt" }],
+    });
+    expect(parseIntent("i threw the chicken thighs")).toEqual({ kind: "toss", item: "chicken thighs" });
+    expect(parseIntent("we just tossed the milk")).toEqual({ kind: "toss", item: "milk" });
+    expect(parseIntent("threw a party last night")).toBeNull();
+  });
+
+  test("tossing the same food twice doesn't toss a second, different item", async () => {
+    const db = await withFoodKeeper();
+    setNow(T0);
+    const ctx = ctxFor(db, 0, true);
+    runTool("add_item", { items: [{ name: "baby spinach", state: "raw" }, { name: "spinach", state: "raw" }] }, ctx);
+    expect(runTool("log_toss", { item: "spinach" }, ctx)).toMatchObject({ done: true, item: "spinach" });
+    // "no like i threw it out" -> the model calls log_toss("spinach") again.
+    expect(runTool("log_toss", { item: "spinach" }, ctx)).toMatchObject({ done: false, already: "spinach" });
+    // Naming the other one still works.
+    expect(runTool("log_toss", { item: "baby spinach" }, ctx)).toMatchObject({ done: true, item: "baby spinach" });
+    // And after a while, "tossed the spinach" means the next one again.
+    runTool("add_item", { items: [{ name: "spinach", state: "raw" }] }, ctx);
+    setNow(addDays(T0, 1));
+    expect(runTool("log_toss", { item: "spinach" }, ctx)).toMatchObject({ done: true });
+  });
+});
+
 describe("fallback rules for food", () => {
   test("parses inventory questions, claims, and logs; ignores 'got it'", () => {
     expect(parseIntent("what's in the fridge?")).toEqual({ kind: "inventory" });
     expect(parseIntent("what's expiring")).toEqual({ kind: "inventory" });
+    for (const q of ["what is in my fridge?", "whats in my pantry", "what do I have", "what food do we have?", "show me the fridge", "what's left"]) {
+      expect(parseIntent(q)).toEqual({ kind: "inventory" });
+    }
     expect(parseIntent("mine!")).toEqual({ kind: "claim" });
     expect(parseIntent("I'll take it")).toEqual({ kind: "claim" });
     expect(parseIntent("I'll take the spinach")).toEqual({ kind: "claim", item: "spinach" });

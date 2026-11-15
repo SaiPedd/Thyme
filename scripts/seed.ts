@@ -1,9 +1,10 @@
-// Seed one household and a starting fridge. Re-running resets household data (keeps FoodKeeper,
-// usage, and seen messages).
+// Seed one household. Re-running resets household data: roommates, the kitchen, expenses, the waste
+// ledger, and chat history (keeps FoodKeeper, usage, and seen messages).
 //
-// Roommates:
-//   default            none: they're added from the household group chat, and the agent asks their names
-//   --demo             fictional Alex, Sam, Jordan (555-01xx numbers, never texted) for `bun run chat`
+//   default            empty kitchen and no roommates: they're added from the household group chat,
+//                      and the agent asks their names. Use this with real phones.
+//   --demo             fictional Alex, Sam, Jordan (555-01xx numbers, never texted) and a starter
+//                      fridge, for `bun run chat`
 //   SEED_MEMBERS=...   "Alex:+1...,Sam:+1..." to pin specific people
 // Optional HOUSEHOLD_CHAT_ID pins the household's Claw group chat; otherwise the first group chat the
 // agent is used in is adopted.
@@ -19,6 +20,7 @@ const { config } = loadConfig(process.env, { requireClaw: false });
 const db = openDb(config.dbPath);
 await ensureShelfLife(db);
 
+const demo = process.argv.includes("--demo");
 let roommates: { name: string; phone: string }[] = [];
 if (process.env.SEED_MEMBERS?.trim()) {
   roommates = process.env.SEED_MEMBERS.split(",").map((pair, i) => {
@@ -27,7 +29,7 @@ if (process.env.SEED_MEMBERS?.trim()) {
     if (!name || !phone) throw new Error(`SEED_MEMBERS entry ${i + 1} must look like Name:+16095550101`);
     return { name, phone };
   });
-} else if (process.argv.includes("--demo")) {
+} else if (demo) {
   roommates = ["Alex", "Sam", "Jordan"].map((name, i) => ({ name, phone: `+1609555010${i + 1}` }));
 }
 const memberIds = new Set(roommates.map((_, i) => i + 1));
@@ -52,16 +54,17 @@ db.transaction(() => {
   );
 })();
 
-// Starting inventory. Expiry comes from FoodKeeper (conservative low end), never typed in here.
+// Demo-only starter fridge. Expiry comes from FoodKeeper (conservative low end), never typed in here.
 // No prices: an item's price only comes from a roommate saying what they paid (or a receipt).
 const shelf = (id: number) => db.query<ShelfLifeRow, [number]>("SELECT * FROM shelf_life WHERE id = ?").get(id)!;
-const items: { query: string; name: string; storage: Storage; owner: number | null; buyer: number; boughtDaysAgo: number }[] = [
+const starter: { query: string; name: string; storage: Storage; owner: number | null; buyer: number; boughtDaysAgo: number }[] = [
   { query: "bagged greens spinach", name: "baby spinach", storage: "fridge", owner: null, buyer: 1, boughtDaysAgo: 0 },
   { query: "chicken parts thighs", name: "chicken thighs", storage: "fridge", owner: 1, buyer: 1, boughtDaysAgo: 0 },
   { query: "eggs in shell", name: "eggs", storage: "fridge", owner: null, buyer: 2, boughtDaysAgo: 3 },
   { query: "rice white", name: "rice", storage: "pantry", owner: null, buyer: 2, boughtDaysAgo: 10 },
   { query: "bananas", name: "bananas", storage: "fridge", owner: null, buyer: 3, boughtDaysAgo: 0 },
 ];
+const items = demo ? starter : [];
 for (const it of items) {
   const match = searchShelfLife(db, it.query, 1)[0];
   const added = addDays(at, -it.boughtDaysAgo);
@@ -78,5 +81,5 @@ for (const it of items) {
 console.log(`[seed] household "Squad House" (${config.householdMode} mode, ${config.householdTz})`);
 if (roommates.length === 0) console.log("[seed] no roommates yet: they're added from the group chat, and the agent asks their names");
 for (const r of roommates) console.log(`[seed]   ${r.name} ${mask(r.phone)}`);
-console.log(`[seed] ${items.length} starting items`);
+console.log(items.length ? `[seed] ${items.length} starter items (demo)` : "[seed] empty kitchen: log food with \"got spinach for $4\"");
 db.close();

@@ -170,7 +170,8 @@ The old events and jobs tables are dropped; the scheduler derives work from item
 6. 2s debounce and tapback acknowledgments (reply normally)
 7. HOUSEHOLD_MODE=dm fan-out (if the spike shows groups work)
 
-Never cut: integer-cent split math, conservative expiry, the privacy projection, quiet hours, caps.
+Never cut: integer-cent split math, conservative expiry, the privacy projection, caps.
+(Quiet hours were removed at the team's request: reminders go out whenever they're due.)
 
 ## Demo (3 min)
 1. The group texts "groceries were $48.60, split 3 ways, chicken thighs ($9) are just mine".

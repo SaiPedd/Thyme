@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { amountsAreGrounded, durationsAreGrounded, MAX_TOOL_ITERATIONS, runAgent, type AgentInput, type GeminiInteraction } from "../src/agent/loop";
+import { amountsAreGrounded, claimsPrivateSend, durationsAreGrounded, MAX_TOOL_ITERATIONS, runAgent, type AgentInput, type GeminiInteraction } from "../src/agent/loop";
 import { parseIntent } from "../src/agent/fallback";
 import { runTool, toolDefinitions, type ToolContext } from "../src/agent/tools";
 import { loadShelfLife, parseFoodKeeper } from "../src/domain/foodkeeper";
@@ -151,11 +151,31 @@ describe("agent loop (Gemini)", () => {
   test("in a group, balances go to a private DM, not to the model", async () => {
     const c = ctx(true);
     const { client, calls } = fakeClient([call("get_balances", {}), text("I DM'd you your balance.")]);
-    const r = await runAgent(base(c, client, "what do I owe?"));
+    const r = await runAgent(base(c, client, "am I behind on paying Sam back?"));
     expect(r.reply).toBe("I DM'd you your balance.");
     expect(JSON.stringify(calls[1]!.params.input.at(-1))).toContain("sent_privately");
     expect(c.drafts).toHaveLength(1);
     expect(c.drafts[0]).toMatchObject({ audience: { kind: "member", memberId: 1 }, sensitivity: "personal", subjectMemberId: 1 });
+  });
+
+  test("fact questions (fridge, balances, waste) are answered by code, never by the model", async () => {
+    for (const q of ["what is in my fridge?", "what do I owe?", "how much have we wasted?"]) {
+      const c = ctx(true);
+      const { client, calls } = fakeClient([text("We have caviar and lobster!")]);
+      const r = await runAgent(base(c, client, q));
+      expect(calls).toHaveLength(0);
+      expect(r).toMatchObject({ source: "fallback", note: "fact question" });
+      expect(r.reply).not.toContain("caviar");
+    }
+  });
+
+  test("a reply claiming a DM that was never sent is rejected", async () => {
+    const c = ctx(true);
+    const { client } = fakeClient([text("I just sent your inventory details to your DMs!")]);
+    const r = await runAgent(base(c, client, "anything good to snack on"));
+    expect(r.note).toBe("claimed a DM that wasn't sent");
+    expect(r.reply ?? "").not.toContain("DM");
+    expect(c.drafts).toHaveLength(0);
   });
 
   test("history is sent as plain text inside the user turn", async () => {
@@ -198,6 +218,15 @@ describe("shelf life facts come from USDA, not the model", () => {
     expect(durationsAreGrounded("lasts 4 to 6 days", ['{"fridge":"4-6 days"}'])).toBe(true);
     expect(durationsAreGrounded("lasts 7 days", ['{"fridge":"4-6 days"}'])).toBe(false);
     expect(durationsAreGrounded("eat it soon", [])).toBe(true);
+  });
+});
+
+describe("claimsPrivateSend", () => {
+  test("spots claims of a private message", () => {
+    for (const s of ["I sent your balance to your DMs", "I DM'd you", "I've sent your inventory privately!", "Texted you a private message"]) {
+      expect(claimsPrivateSend(s)).toBe(true);
+    }
+    for (const s of ["Balances are private.", "Ask me in a DM for your balance.", "Logged $48.60."]) expect(claimsPrivateSend(s)).toBe(false);
   });
 });
 

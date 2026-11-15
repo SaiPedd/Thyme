@@ -68,12 +68,14 @@ iMessage ── Claw Messenger ── WebSocket ──► inbox ──► router
                                                                                        shelf life)
                                                           │
                           outbox ◄── privacy projection ◄─┘
-             (quiet hours, caps, retries)  (group vs DM)
+             (caps, budget, retries)       (group vs DM)
 ```
 
 Design rules:
 
-- **Code owns every fact.** Gemini picks which tool to call and how to phrase the reply. Dollar amounts,
+- **Code owns every fact.** Questions whose answer is a list of facts ("what's in the fridge?", "what do I
+  owe?", "how much have we wasted?") are answered by code directly, without the model. A reply that claims
+  "I DM'd you" when nothing was sent is rejected. Otherwise, Gemini picks which tool to call and how to phrase the reply. Dollar amounts,
   shares, balances, and shelf-life days all come from code. A reply that states an amount or a
   duration that no tool returned is rejected and replaced with the tool's own wording.
 - **Privacy by construction.** Every outgoing message declares who it's for and whether it's personal.
@@ -82,7 +84,7 @@ Design rules:
 - **Never stuck.** If Gemini is off, slow (over 10 s), or fails, a rule-based parser handles the core
   messages ("groceries $30 split 3 ways", "undo", "what do I owe"). If a tool already ran, Thyme
   reports that result instead of running the action twice.
-- **Polite in a group.** Proactive messages respect quiet hours (10 PM to 8 AM), daily caps, and a
+- **Polite in a group.** Proactive messages respect daily caps and a
   monthly message budget. Replies to someone who just texted always go out right away.
 - **Money in integer cents.** Shares always add up exactly to the total. Leftover cents go to the person
   who paid. This is checked by a 2,000-case property test.
@@ -104,7 +106,7 @@ cp .env.example .env    # fill in the values; never commit .env
 | `GEMINI_MODEL` | Defaults to `gemini-3.5-flash-lite` |
 | `BOT_NAME` / `BOT_ALIASES` | The agent's name (default `Thyme`) and other names it answers to |
 | `HOUSEHOLD_MODE` | `group` (household lives in a group chat) or `dm` (group messages go to each roommate's DM) |
-| `HOUSEHOLD_TZ` | Time zone for quiet hours and reminders, e.g. `America/New_York` |
+| `HOUSEHOLD_TZ` | Time zone for the 9 AM reminders and dates, e.g. `America/New_York` |
 | `LLM` | `off` to use only the rule-based fallback |
 | `CLAW_TEST_NUMBERS` | Phones for the spike and phone registration, in `+1...` format |
 
@@ -116,11 +118,11 @@ Logs never contain message text or full phone numbers (only the last 4 digits).
 ```sh
 bun run spike            # check Claw connectivity, group chats, and photo attachments
 bun run register-phones  # register CLAW_TEST_NUMBERS with Claw
-bun run seed             # one household + a starting fridge; roommates join from the group chat
-bun run seed --demo      # fictional roommates (Alex, Sam, Jordan) for the terminal chat
+bun run seed             # reset: one household, empty kitchen; roommates join from the group chat
+bun run seed --demo      # fictional roommates (Alex, Sam, Jordan) and a starter fridge for the terminal chat
 bun run chat             # talk to Thyme in the terminal (/as <name>, /group, /dm); sends no real messages
 bun start                # run Thyme on Claw Messenger (real iMessage)
-bun test                 # 134 tests
+bun test                 # 138 tests
 bun run typecheck
 ```
 
@@ -135,7 +137,7 @@ src/agent/               loop.ts (Gemini function calling), tools.ts, prompt.ts,
 src/domain/              money, splits, expenses, household, foodkeeper, phone
 src/privacy/projection.ts  who can see what
 src/inbox.ts             dedupe, debounce, per-chat ordering
-src/outbox.ts            quiet hours, caps, budget, retries, delivery tracking
+src/outbox.ts            caps, budget, retries, delivery tracking
 src/router.ts            members, group rules, names, replies
 src/db/                  SQLite schema and migrations
 src/clock.ts             the only source of time (fake clock for demos)
