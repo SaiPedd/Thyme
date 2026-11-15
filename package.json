@@ -1,0 +1,24 @@
+{
+  "name": "fridge-bud",
+  "version": "0.0.1",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "bun index.ts",
+    "dev": "bun --watch index.ts",
+    "test": "bun test",
+    "typecheck": "tsc --noEmit",
+    "load-foodkeeper": "bun scripts/load-foodkeeper.ts",
+    "spike": "bun scripts/spike.ts",
+    "register-phones": "bun scripts/register-phones.ts",
+    "seed": "bun scripts/seed.ts",
+    "chat": "bun index.ts --terminal"
+  },
+  "devDependencies": {
+    "typescript": "^5",
+    "@types/bun": "latest"
+  },
+  "dependencies": {
+    "@google/genai": "^2.3.0"
+  }
+}
