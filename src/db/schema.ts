@@ -200,4 +200,17 @@ ALTER TABLE sends ADD COLUMN reply_to TEXT;
   `
 ALTER TABLE members ADD COLUMN named INTEGER NOT NULL DEFAULT 1;
 `,
+  // 4: local cache of TheMealDB lookups (live API + cache; the DB file is gitignored, never committed).
+  `
+CREATE TABLE mealdb_meals (
+  id          TEXT PRIMARY KEY,                              -- idMeal
+  data        TEXT NOT NULL,                                 -- the meal JSON as returned
+  fetched_at  TEXT NOT NULL
+);
+CREATE TABLE mealdb_by_ingredient (
+  ingredient  TEXT PRIMARY KEY,                              -- normalized query, e.g. "chicken_thighs"
+  meal_ids    TEXT NOT NULL,                                 -- JSON array of idMeal
+  fetched_at  TEXT NOT NULL
+);
+`,
 ];

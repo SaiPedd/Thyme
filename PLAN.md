@@ -138,6 +138,25 @@ the ledger row and balances are Phase 5.
   and saved dislikes are respected.
 - Test: `bun test` and `bun run chat`
 
+**TheMealDB integration** (branch `phase-4-mealdb`):
+- **What:** `suggest_recipe` pulls real recipes from TheMealDB (https://www.themealdb.com/api.php, free key "1").
+- **Fetching:**
+  - live API calls with a SQLite cache, kept 7 days per ingredient search and 30 days per recipe (migration 4)
+  - a 3.5 s network budget; on failure it falls back to the 16 built-in recipes
+  - `bun run mealdb-warm` pre-caches recipes for the demo
+- **Matching:**
+  - The search uses the soonest-expiring items.
+  - Meals that match several kitchen items rank higher, a free stand-in for MealDB's premium multi-ingredient filter.
+  - A recipe qualifies with half or more of its main ingredients in the kitchen.
+  - Pantry staples (salt, pepper, garlic, oils, dried spices and herbs, onions, stock, flour, sugar...) are assumed.
+- **What Thyme shows:**
+  - code lists what's missing ("you'd also need")
+  - a closest match (2+ mains, about a third) is offered only if nothing better fits, and it's labeled as such
+  - a full built-in match beats a MealDB closest match, which is then shown as an extra idea
+- **Hard rules:** diet, dislike, and allergy conflicts always rule a recipe out.
+- **Reply:** includes the recipe link and the "Recipe from TheMealDB" credit.
+- **Toggle:** `MEALDB=off` turns it off.
+
 ### Phase 5: P4 waste ledger and combined balances (T+2:30 to 3:15)
 - log_toss writes a ledger row. A personal toss costs the owner. A shared toss is split equally,
   and each non-buyer owes the buyer their share. An at-risk item (within 48h) eaten = rescued.

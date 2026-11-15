@@ -9,7 +9,8 @@ import { searchShelfLife, type ShelfLifeRow, type Storage } from "../domain/food
 import { claimItem, claimTime, claimWinner } from "../domain/claims";
 import { now } from "../clock";
 import { forgetMember, prefsFor, removePref, savePref, type PrefKind } from "../domain/prefs";
-import { pickRecipes, uncheckedDiets, validateRecipe, type RecipeCheck } from "../domain/recipes";
+import { MEALDB_CREDIT, type MealDbClient } from "../domain/mealdb";
+import { pickMealDbRecipes, pickRecipes, uncheckedDiets, validateRecipe, type MealDbPick, type RecipeCheck } from "../domain/recipes";
 import {
   addItem,
   expiryPhrase,
@@ -40,6 +41,8 @@ export interface ToolContext {
   sentAt?: string;
   /** Extra messages to send after the reply (e.g. a private balance DM). */
   drafts: Draft[];
+  /** TheMealDB client for recipe ideas; absent or null = built-in recipes only. */
+  mealdb?: MealDbClient | null;
 }
 
 export type ToolResult = Record<string, unknown>;
@@ -51,7 +54,8 @@ interface ToolDef {
   name: string;
   description: string;
   input_schema: JsonSchema;
-  run: (input: any, ctx: ToolContext) => ToolResult;
+  /** Most tools are synchronous; suggest_recipe is async (it may call TheMealDB). */
+  run: (input: any, ctx: ToolContext) => ToolResult | Promise<ToolResult>;
 }
 
 /** Gemini Interactions function tool. */
@@ -465,10 +469,35 @@ export function hasPendingCook(db: Database, memberId: number): boolean {
 const ingredientList = (check: RecipeCheck) =>
   check.checks.map((c) => (c.staple ? `${c.ingredient} (staple)` : c.item && c.item !== c.ingredient ? `${c.ingredient} (the ${c.item})` : c.ingredient));
 
+/** A MealDB pick as facts for the model: what they have, what they'd also need (code-computed), short steps, credit. */
+function mealDbResult(top: MealDbPick, others: MealDbPick[], notes: string[]): ToolResult {
+  const measure = (name: string) => top.recipe.ingredients.find((i) => i.name === name)?.measure ?? "";
+  const withMeasure = (name: string) => [measure(name), name].filter(Boolean).join(" ");
+  return {
+    ok: true,
+    source: "TheMealDB",
+    ...(top.closeMatch ? { close_match: true, note: "Closest match: they have only some of the main ingredients. Say so and list also_need." } : {}),
+    title: top.recipe.title,
+    link: top.recipe.url,
+    have: top.have.map((h) => (h.item.toLowerCase() === h.ingredient.toLowerCase() ? withMeasure(h.ingredient) : `${withMeasure(h.ingredient)} (the ${h.item})`)),
+    also_need: top.missing.map(withMeasure),
+    assumed_staples: top.staples,
+    steps: top.recipe.steps.slice(0, 6).map((s) => (s.length > 220 ? `${s.slice(0, 217)}...` : s)),
+    more_steps_at_link: top.recipe.steps.length > 6,
+    uses_food_expiring_soon: top.expiringUsed,
+    other_ideas: others.map((o) => o.recipe.title),
+    credit: MEALDB_CREDIT,
+    notes,
+  };
+}
+
 const suggestRecipeTool: ToolDef = {
   name: "suggest_recipe",
   description:
-    "Recipe ideas from what's actually in the kitchen. With no recipe, code picks a simple one that uses food about to expire. " +
+    "Recipe ideas from what's actually in the kitchen. With no recipe, code picks one that uses food about to expire, " +
+    "from TheMealDB when available (the kitchen has most of the main ingredients; code lists what else they'd need), else a simple built-in one. " +
+    "Always mention also_need when it's present. When source is TheMealDB, give 2-3 short steps, include the link so they can open " +
+    "the full recipe, and credit TheMealDB. " +
     "To suggest your own idea, pass it as recipe: code checks every ingredient is in the inventory (salt, oil, water assumed) and fits " +
     "everyone's saved diets, dislikes, and allergies. Only suggest a recipe this tool returned with ok: true. Never say a dish is allergy-safe.",
   input_schema: {
@@ -489,7 +518,7 @@ const suggestRecipeTool: ToolDef = {
     },
     additionalProperties: false,
   },
-  run(input, ctx) {
+  async run(input, ctx) {
     const diners = resolveMany(ctx, input.for, [ctx.member.id]);
     if ("error" in diners) return diners;
     const items = visibleItems(ctx.db, ctx.household.id, ctx.member.id, { sharedOnly: ctx.isGroup });
@@ -522,8 +551,22 @@ const suggestRecipeTool: ToolDef = {
     }
 
     const last = input.another ? getJsonState<{ title: string }>(ctx, `recipe:${ctx.member.id}`) : null;
+
+    // TheMealDB first: a real recipe where the kitchen has half or more of the main ingredients.
+    const meals = ctx.mealdb ? await pickMealDbRecipes(ctx.db, ctx.mealdb, items, prefs, { exclude: last ? [last.title] : [] }) : [];
+    const top = meals[0];
+    if (top && !top.closeMatch) {
+      remember(top.recipe.title, { itemIds: top.itemIds } as RecipeCheck);
+      return mealDbResult(top, meals.slice(1, 3), notes);
+    }
+
     const picks = pickRecipes(items, prefs, last ? [last.title] : []);
     const best = picks[0];
+    if (!best && top) {
+      // Nothing built-in fits: offer MealDB's closest match, clearly labeled, with what's missing.
+      remember(top.recipe.title, { itemIds: top.itemIds } as RecipeCheck);
+      return mealDbResult(top, meals.slice(1, 3), notes);
+    }
     if (!best) {
       return {
         ok: false,
@@ -539,6 +582,10 @@ const suggestRecipeTool: ToolDef = {
       steps: best.recipe.steps,
       uses_food_expiring_soon: best.check.expiringUsed,
       other_ideas: picks.slice(1, 3).map((p) => p.recipe.title),
+      // A bigger MealDB recipe they could make with a few more things.
+      ...(top
+        ? { mealdb_idea: { title: top.recipe.title, link: top.recipe.url, also_need: top.missing, credit: MEALDB_CREDIT } }
+        : {}),
       notes,
     };
   },
@@ -696,8 +743,18 @@ export function toolDefinitions(): FunctionTool[] {
   return TOOLS.map((t) => ({ type: "function", name: t.name, description: t.description, parameters: geminiSchema(t.input_schema) as JsonSchema }));
 }
 
+/** Run a synchronous tool. Throws for async tools (suggest_recipe): use runToolAsync. */
 export function runTool(name: string, input: unknown, ctx: ToolContext): ToolResult {
   const tool = TOOLS.find((t) => t.name === name);
   if (!tool) return { error: `unknown tool ${name}` };
-  return tool.run(input ?? {}, ctx);
+  const result = tool.run(input ?? {}, ctx);
+  if (result instanceof Promise) throw new Error(`${name} is async: use runToolAsync`);
+  return result;
+}
+
+/** Run any tool, sync or async. The agent loop and the fallback use this. */
+export async function runToolAsync(name: string, input: unknown, ctx: ToolContext): Promise<ToolResult> {
+  const tool = TOOLS.find((t) => t.name === name);
+  if (!tool) return { error: `unknown tool ${name}` };
+  return await tool.run(input ?? {}, ctx);
 }
