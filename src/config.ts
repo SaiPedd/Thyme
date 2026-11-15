@@ -17,6 +17,10 @@ export interface Config {
   householdTz: string;
   testNumbers: string[];
   dbPath: string;
+  /** Use TheMealDB for recipe ideas (MEALDB=off for built-in recipes only). */
+  mealdb: boolean;
+  /** TheMealDB key: "1" is the free development/educational key; a supporter key for public releases. */
+  mealdbApiKey: string;
 }
 
 export interface Loaded {
@@ -78,6 +82,8 @@ export function loadConfig(env: Env = process.env, opts: { requireClaw?: boolean
     householdTz,
     testNumbers,
     dbPath: val("DB_PATH") ?? "data/fridge.db",
+    mealdb: (val("MEALDB") ?? "on").toLowerCase() !== "off",
+    mealdbApiKey: val("MEALDB_API_KEY") ?? "1",
   };
 
   const secret = (v: string | undefined) => (v ? "set" : "MISSING");
@@ -91,6 +97,7 @@ export function loadConfig(env: Env = process.env, opts: { requireClaw?: boolean
     `HOUSEHOLD_TZ       ${householdTz}`,
     `CLAW_TEST_NUMBERS  ${testNumbers.length ? testNumbers.map(mask).join(", ") : "none"}`,
     `DB_PATH            ${config.dbPath}`,
+    `MEALDB             ${config.mealdb ? `on (${config.mealdbApiKey === "1" ? "free test key" : "MEALDB_API_KEY set"})` : "off"}`,
   ];
   return { config, errors, warnings, report };
 }

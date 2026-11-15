@@ -1,7 +1,7 @@
 // Every outgoing message goes through here.
 // - Privacy: project() resolves the audience; personal content can never reach the group.
-// - Quiet hours (10 PM to 8 AM, household tz) and daily caps apply to PROACTIVE sends only;
-//   replies to someone who just texted go out immediately.
+// - Daily caps apply to PROACTIVE sends only; replies to someone who just texted go out immediately.
+//   (No quiet hours: removed at the team's request, so reminders go out whenever they're due.)
 // - Budget: refuse proactive sends once usage passes 90% of the monthly message budget.
 // - Tracks each send (sends table), retries retryable failures, honors 429 Retry-After,
 //   and counts usage locally. ok:true from Claw means accepted, never delivered.
@@ -19,7 +19,6 @@ export type SendKind = "reply" | "proactive";
 export interface OutboxOptions {
   monthlyBudget?: number;
   caps?: { memberPerDay: number; groupPerDay: number };
-  quietHours?: { start: number; end: number } | null;
   maxAttempts?: number;
   sleep?: (ms: number) => Promise<void>;
   log?: (line: string) => void;
@@ -42,29 +41,12 @@ function localParts(tz: string, at: Date) {
   return { date: `${get("year")}-${get("month")}-${get("day")}`, month: `${get("year")}-${get("month")}`, hour: Number(get("hour")) };
 }
 
-export function isQuietHour(hour: number, q: { start: number; end: number }): boolean {
-  return q.start > q.end ? hour >= q.start || hour < q.end : hour >= q.start && hour < q.end;
-}
-
-/** The next moment (to the minute) outside quiet hours. */
-export function quietUntil(tz: string, at: Date, q: { start: number; end: number }): Date | null {
-  if (!isQuietHour(localParts(tz, at).hour, q)) return null;
-  let t = new Date(at.getTime());
-  t.setUTCSeconds(0, 0);
-  for (let i = 0; i < 24 * 60; i++) {
-    t = new Date(t.getTime() + 60_000);
-    if (!isQuietHour(localParts(tz, t).hour, q)) return t;
-  }
-  return null;
-}
-
 const destKey = (d: Destination) => (d.kind === "group" ? { chat_id: d.chatId, to_phone: null } : { chat_id: null, to_phone: d.phone });
 const destLabel = (d: Destination) => (d.kind === "group" ? "group" : mask(d.phone));
 
 export class Outbox {
   private readonly budget: number;
   private readonly caps: { memberPerDay: number; groupPerDay: number };
-  private readonly quiet: { start: number; end: number } | null;
   private readonly maxAttempts: number;
   private readonly sleep: (ms: number) => Promise<void>;
   private readonly log: (line: string) => void;
@@ -78,7 +60,6 @@ export class Outbox {
     this.devGroupChatId = options.devGroupChatId;
     this.budget = options.monthlyBudget ?? 2000;
     this.caps = options.caps ?? { memberPerDay: 3, groupPerDay: 4 };
-    this.quiet = options.quietHours === undefined ? { start: 22, end: 8 } : options.quietHours;
     this.maxAttempts = options.maxAttempts ?? 3;
     this.sleep = options.sleep ?? ((ms) => new Promise((r) => setTimeout(r, ms)));
     this.log = options.log ?? ((l) => console.log(l));
@@ -135,19 +116,14 @@ export class Outbox {
         this.log(`[out] ${destLabel(destination)} proactive refused (daily cap)`);
         return { id, destination, status: "refused", reason: "daily cap" };
       }
-      const until = this.quiet ? quietUntil(tz, at, this.quiet) : null;
-      if (until) {
-        insert("deferred", until.toISOString(), null);
-        this.log(`[out] ${destLabel(destination)} proactive deferred (quiet hours)`);
-        return { id, destination, status: "deferred" };
-      }
     }
 
     insert("queued", null, null);
     return this.deliver(id, destination, text, opts.kind, tz, opts.replyTo);
   }
 
-  /** Send queued/deferred rows whose time has come (called by the scheduler). */
+  /** Send deferred rows whose time has come (called by the scheduler). Nothing defers now that quiet
+   *  hours are gone, but this still sends any message an older run held back. */
   async flushDue(): Promise<SendOutcome[]> {
     const tz = getHousehold(this.db)?.tz ?? "UTC";
     const due = this.db

@@ -11,7 +11,6 @@ About 4 minutes. Rehearse it 3 to 5 times from a fresh seed, and record one clea
      then `bun run start`. Each roommate texts the group once and tells Thyme their name.
 3. Open a second terminal in the repo for `bun run time-travel` (step 5).
 4. In the terminal, use `~/Desktop/receipt.jpg`. Live, have the same receipt photo on the presenter's phone.
-5. Run the demo during the day: proactive messages wait during quiet hours (10 PM to 8 AM).
 
 In the terminal, a line starting with `/` is a command for the terminal chat (who you are, sending a photo).
 Everything else is a text message. `/as Sam, <message>` switches to Sam and sends the message.
@@ -39,9 +38,9 @@ Say: "The group sees shared splits. Personal balances, allergies, and personal i
 ### 3. Cook with what's there (P3)
 | Type | Expect |
 |---|---|
-| `Thyme what can I make tonight?` | A recipe using only what's in the fridge (e.g. egg fried rice with the spinach). |
+| `Thyme what can I make tonight?` | A recipe built around what's in the fridge (from TheMealDB), plus anything else you'd need to buy. |
 
-Say: "Code checks every recipe against the current inventory, so it never suggests something you don't have."
+Say: "It starts from what's already in the kitchen, so the food that's about to go bad gets used first."
 
 ### 4. Food is about to spoil (P2)
 In the second terminal:
@@ -60,10 +59,10 @@ Say: "Expiry dates come from the USDA FoodKeeper table, using the conservative e
 ### 5. Waste ledger (P4)
 | Type (as Jordan) | Expect |
 |---|---|
-| `Thyme I tossed the bananas, they went bad` | Logged; the cost of shared waste is split like groceries. |
-| `Thyme how much food have we wasted?` | Items, dollars, pounds, and CO2e (estimates). |
+| `Thyme I tossed the bananas, they went bad` | Logged in the waste ledger (tracking only: it doesn't change anyone's balance). |
+| `Thyme how much food have we wasted?` | Items wasted and rescued this week. Dollars only count food with a known price (the starter bananas have none). |
 
-Say: "Shared waste goes into the same balances as groceries, so the house sees what it costs to throw food away."
+Say: "Every toss and rescue goes in the waste ledger, so the house sees what it's throwing away, in dollars and CO2."
 
 ### Close
 "One group chat. It splits the bill, warns you before food goes bad, cooks with what's left, and keeps score on waste."
@@ -76,7 +75,7 @@ Say: "Shared waste goes into the same balances as groceries, so the house sees w
 | Wrong change before `yes` | Send the right one (`2 is shared`, `Alex paid`), or `cancel` and send the photo again. |
 | "I'm having trouble reading receipts right now" | A Gemini hiccup (seen once in rehearsal; the same photo worked a minute later). Send the photo again. |
 | Thyme says "having trouble" | Wait a few seconds and resend. If Gemini is down, the rule-based fallback still handles plain logs, `undo`, and `what do I owe?`. |
-| Reminder doesn't show after time travel | Someone has to message the group first. It also waits during quiet hours. |
+| Reminder doesn't show after time travel | Someone has to message the group first. |
 | Anything else | Play the backup video. |
 
 ## Known rough edges (stay off these paths on stage)

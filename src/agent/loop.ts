@@ -4,9 +4,9 @@
 // (or the user) produced is rejected.
 
 import { GoogleGenAI } from "@google/genai";
-import { describeToolResult, runFallback } from "./fallback";
+import { describeToolResult, parseIntent, runFallback } from "./fallback";
 import { systemPrompt, turnContext } from "./prompt";
-import { runTool, toolDefinitions, type ToolContext } from "./tools";
+import { runToolAsync, toolDefinitions, type ToolContext } from "./tools";
 
 export const MAX_TOOL_ITERATIONS = 6;
 export const AGENT_TIMEOUT_MS = 10_000;
@@ -73,6 +73,38 @@ export function durationsAreGrounded(reply: string, sources: string[]): boolean 
   return true;
 }
 
+/**
+ * If the reply uses a TheMealDB recipe, make sure the link and the credit are in it (code, not the model,
+ * guarantees attribution and that they can open the full recipe).
+ */
+export function withRecipeCredit(reply: string, toolResults: { name: string; result: Record<string, unknown> }[]): string {
+  type Meal = { title?: unknown; link?: unknown; credit?: unknown };
+  const meals: Meal[] = [];
+  for (const t of toolResults) {
+    if (t.name !== "suggest_recipe") continue;
+    if (t.result.source === "TheMealDB") meals.push(t.result as Meal);
+    if (t.result.mealdb_idea) meals.push(t.result.mealdb_idea as Meal); // the extra idea next to a built-in recipe
+  }
+  const lower = reply.toLowerCase();
+  // The MealDB recipe the reply talks about: by title, else the main MealDB result.
+  const meal =
+    meals.reverse().find((m) => typeof m.title === "string" && lower.includes(m.title.toLowerCase())) ??
+    (toolResults.findLast?.((t) => t.name === "suggest_recipe")?.result.source === "TheMealDB" ? meals[0] : undefined);
+  if (!meal) return reply;
+  const extra: string[] = [];
+  if (typeof meal.link === "string" && !reply.includes(meal.link)) extra.push(`Full recipe: ${meal.link}`);
+  if (!/themealdb/i.test(reply) && meal.credit) extra.push(String(meal.credit));
+  return extra.length ? `${reply}\n${extra.join("\n")}` : reply;
+}
+
+/** Intents answered by code, never by the model's wording. */
+const FACT_QUESTIONS = new Set(["inventory", "balances", "waste"]);
+
+/** "I sent your balance to your DMs", "I DM'd you": only true if a private message was actually queued. */
+export function claimsPrivateSend(reply: string): boolean {
+  return /\b(sent|send|texted|messaged)\b[^.!?\n]*\b(DMs?|privately|private message)\b|\bDM'?d (you|them)\b/i.test(reply);
+}
+
 /** Recent chat as plain text, so we never replay old model turns in an undocumented format. */
 function renderHistory(history: HistoryTurn[], botName: string): string {
   if (history.length === 0) return "";
@@ -85,16 +117,20 @@ export async function runAgent(input: AgentInput): Promise<AgentResult> {
   const toolCalls: string[] = [];
   const toolResults: { name: string; result: Record<string, unknown> }[] = [];
 
-  const fallback = (note: string): AgentResult => {
+  const fallback = async (note: string): Promise<AgentResult> => {
     // If a tool already ran this turn (e.g. an expense was saved), don't run the fallback too:
     // that would apply the action twice. Report the last result instead.
     const last = toolResults.at(-1);
     if (last) return { reply: describeToolResult(last.name, last.result) ?? SORRY, source: "tools", toolCalls, note };
-    const reply = runFallback(text, ctx, botName);
+    const reply = await runFallback(text, ctx, botName);
     return { reply, source: reply ? "fallback" : "none", toolCalls, note };
   };
 
   if (!input.client) return fallback("llm off");
+  // Questions whose whole answer is a list of facts (what's in the fridge, balances, waste) are
+  // answered by code directly: the model has made up items and "I DM'd you" for these before.
+  const intent = parseIntent(text, botName);
+  if (intent && FACT_QUESTIONS.has(intent.kind)) return fallback("fact question");
 
   // Names the sender actually used: the new message plus their own recent messages (not other people's).
   const own = input.history
@@ -157,7 +193,8 @@ export async function runAgent(input: AgentInput): Promise<AgentResult> {
         const sources = [text, ...toolResults.map((t) => JSON.stringify(t.result))];
         if (!amountsAreGrounded(reply, sources)) return fallback("ungrounded amount");
         if (!durationsAreGrounded(reply, sources)) return fallback("ungrounded duration");
-        return { reply, source: "gemini", toolCalls };
+        if (claimsPrivateSend(reply) && ctx.drafts.length === 0) return fallback("claimed a DM that wasn't sent");
+        return { reply: withRecipeCredit(reply, toolResults), source: "gemini", toolCalls };
       }
 
       if (i === MAX_TOOL_ITERATIONS) return fallback("too many tool calls");
@@ -168,7 +205,7 @@ export async function runAgent(input: AgentInput): Promise<AgentResult> {
         let payload: Record<string, unknown>;
         let isError = false;
         try {
-          payload = runTool(String(call.name), call.arguments ?? {}, toolCtx);
+          payload = await runToolAsync(String(call.name), call.arguments ?? {}, toolCtx);
           toolResults.push({ name: String(call.name), result: payload });
         } catch (error) {
           payload = { error: (error as Error).message };

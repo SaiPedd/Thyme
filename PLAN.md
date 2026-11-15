@@ -34,6 +34,23 @@ A = channel owner, B = agent owner, C = domain/data owner.
 - Done when: the spike report is posted, `bun run start` prints a preflight report, and tests pass.
 - Test: `bun run spike` and `bun test`
 
+**Status: DONE.** As built, and what changed from the plan:
+- Spike results:
+  - Readiness OK.
+  - Group creation works, but only once every number is registered.
+  - Group messages from both members arrive (`isGroup=true`; `participants` lists members, not the bot).
+  - Receipt photos arrive as `image/jpeg` and download without auth.
+  - Inbound DMs were not confirmed yet.
+  - Decision: `HOUSEHOLD_MODE=group`, receipt photos in scope (stretch).
+- The Claw account started on a 1-number plan, so group creation failed. It was upgraded to Growth (5 numbers).
+  Added `scripts/register-phones.ts` (`bun run register-phones`), which stops on the plan-limit error instead of retrying.
+- The spike prints failure reasons with phone numbers masked, even inside Claw's own error text.
+- USDA blocks automated downloads, so `data/foodkeeper.json` (661 products) was saved by hand. It's committed (public domain).
+- `searchShelfLife()`:
+  - foods matching every word rank first, with exact names boosted ("milk" finds Milk)
+  - reloading upserts, so items that reference foods keep working
+- Old local databases are refused with a clear message (delete `data/fridge.db*`; it rebuilds).
+
 ### Phase 1: channel, agent skeleton, money core (T+0:40 to 1:30), all three in parallel
 **Status: DONE.** Integrated the Bun WebSocket (Claw adapter, inbox, outbox, privacy projection) and
 developed the Gemini Interactions loop (gemini-3.5-flash-lite, function calling, rule-based fallback).
@@ -49,6 +66,26 @@ developed the Gemini Interactions loop (gemini-3.5-flash-lite, function calling,
   and projection; split math tests pass.
 - Test: `bun test` and `bun run chat`
 
+As built, and what changed from the plan:
+- **Model provider:** switched from the Anthropic Messages API to **Gemini 3.5 Flash-Lite** via the Interactions API (`@google/genai`).
+  - Stateless (`store: false`).
+  - The model's steps are sent back unchanged, with one `function_result` per call.
+  - The 10 s deadline is enforced by our own abort and race, not only by the SDK.
+  - Chat history is sent as plain text inside the user turn.
+- **Speed:** with Gemini's default thinking, a tool turn took about 12 s, over the deadline. `thinking_level: "low"` brought it to about 1.5 s (measured).
+- **Grounding:** a reply that states a dollar amount or a duration no tool returned is rejected and answered from the tool's own wording.
+  - If the model fails after a tool already ran, Thyme reports that result instead of running the action again.
+- **Tools:** fully wired to the domain code, not stubs (`record_expense`, `undo_last`, `get_balances`, `shelf_life_lookup`, `get_household_summary`).
+  - `shelf_life_lookup` returns USDA day ranges, so durations are grounded.
+- **Privacy:** balances asked about in the group go to the asker's DM, and the model only hears that they were sent privately.
+- **Outbox:** stores deferred message text (migration 2) so quiet-hour messages can go out later.
+- **Terminal mode:** a stand-in group that is never saved as the household chat.
+- **Fictional numbers:** 555-01xx numbers are never texted, so they can't use up registration slots.
+- **Added after the Phase 1 review:**
+  - The agent is named **Thyme** (`BOT_NAME`, plus `BOT_ALIASES`) and answers when its name appears anywhere in a message, with or without @ or "hey".
+  - Roommates come from the household group's participants (shown as "Roommate ####" until named, migration 3). One intro asks names, "I'm <name>" sets them, and later joiners get a welcome.
+  - `bun run seed` no longer invents names; `--demo` adds fictional roommates for the terminal.
+
 ### Phase 2: P1a expense splitting end to end (T+1:30 to 2:00), first demo-able feature
 **Status: DONE.** Split summary posted to the group (explicit who-owes-whom), expenses recorded with
 integer-cent splits, duplicate detection, undo, and balances sent privately by DM.
@@ -59,16 +96,27 @@ integer-cent splits, duplicate detection, undo, and balances sent privately by D
   shares that sum to the total, and "undo" reverses it, over the terminal and from a phone.
 - Test: `bun test` and `bun run chat`
 
+As built, and what changed from the plan:
+- Most of the expense code was built during Phase 1: money, splits, expense storage, undo, balances, and the tools.
+- **Wording fix from a live run:** Gemini first said "Alex owes $22.20" when Alex was the one who paid.
+  - `record_expense` now returns explicit `who_owes_whom` lines ("Sam owes Alex $13.20") and the payer's own share.
+  - Replies now read "Sam and Jordan each owe you $13.20".
+- **Verified in the terminal with real Gemini calls:**
+  - the demo split comes out exactly to $22.20 / $13.20 / $13.20
+  - "what do I owe?" in the group sends the amounts by DM only
+  - "undo" reverses the expense
+- **Still to verify on phones:** the full flow over Claw with Gemini, and inbound DMs.
+
 ### Phase 3: P2 inventory, expiry, reminders, claims (T+1:30 to 2:30), B and C in parallel with Phase 2
 **Status: DONE.** add_item, use_item, log_toss, get_inventory, claim_item (agent + fallback rules);
 src/scheduler.ts (09:00 reminders, one retry, via the outbox); claims by sentAt (an earlier claim that
 arrives late takes over and the group is told); `time-travel` saves the clock offset in the state
-table so a running agent follows it within 5 s; data/prices.json. log_toss only marks the item;
-the ledger row and balances are Phase 5.
+table so a running agent follows it within 5 s. Item prices come only from what a roommate says they
+paid ("got spinach for $4", or an expense line item like "chicken thighs ($9)"); there are no estimates.
 - shelf_life_lookup (top 5 matches via FTS5). The model picks an id; code computes expires_at (low end).
   Ask raw or cooked when ambiguous.
-- add_item, use_item, log_toss, get_inventory; data/prices.json (~60 items) for estimates,
-  overridden by receipts or the user.
+- add_item, use_item, log_toss, get_inventory. An item's price is what the user said they paid, or
+  (Phase 6) the receipt line; otherwise it's unknown. Never estimated.
 - scheduler.ts: a daily 09:00 job (HOUSEHOLD_TZ) finds items expiring within 48h. Shared items
   go to the group, personal items to the owner's DM. One retry the next morning, then stop.
   Everything goes through the outbox.
@@ -93,26 +141,44 @@ confirmation, check_item, forget_me, and fallback rules for all of them.
   and saved dislikes are respected.
 - Test: `bun test` and `bun run chat`
 
-### Phase 5: P4 waste ledger and combined balances (T+2:30 to 3:15)
-**Status: DONE.** log_toss writes the ledger; a shared toss is split equally into balance_entries
-(source 'waste'), except when the buyer already logged an expense the day the item was added (no
-double charge). Rescues are logged from use_item and cooked_recipe. undo_last reverses the newer of
-the last expense or toss. get_waste_summary gives $, lb, and CO2 (src/domain/impact.ts); the group gets
-household totals only.
-- log_toss writes a ledger row. A personal toss costs the owner. A shared toss is split equally,
-  and each non-buyer owes the buyer their share. An at-risk item (within 48h) eaten = rescued.
-- Same balance_entries table as expenses. "what do I owe?" returns one number plus a breakdown, in DM.
-- CO2 from a hardcoded per-category factor, with the source cited in code and the README.
-- The group sees household totals only.
-- Done when: tossing a shared item changes everyone's balance correctly, and the group only sees totals.
-- Test: `bun test`
+**TheMealDB integration** (branch `phase-4-mealdb`):
+- **What:** `suggest_recipe` pulls real recipes from TheMealDB (https://www.themealdb.com/api.php, free key "1").
+- **Fetching:**
+  - live API calls with a SQLite cache, kept 7 days per ingredient search and 30 days per recipe (migration 4)
+  - a 3.5 s network budget; on failure it falls back to the 16 built-in recipes
+  - `bun run mealdb-warm` pre-caches recipes for the demo
+- **Matching:**
+  - The search uses the soonest-expiring items.
+  - Meals that match several kitchen items rank higher, a free stand-in for MealDB's premium multi-ingredient filter.
+  - A recipe qualifies with half or more of its main ingredients in the kitchen.
+  - Pantry staples (salt, pepper, garlic, oils, dried spices and herbs, onions, stock, flour, sugar...) are assumed.
+- **What Thyme shows:**
+  - code lists what's missing ("you'd also need")
+  - a closest match (2+ mains, about a third) is offered only if nothing better fits, and it's labeled as such
+  - a full built-in match beats a MealDB closest match, which is then shown as an extra idea
+- **Hard rules:** diet, dislike, and allergy conflicts always rule a recipe out.
+- **Reply:** includes the recipe link and the "Recipe from TheMealDB" credit.
+- **Toggle:** `MEALDB=off` turns it off.
+
+### Phase 5: P4 waste ledger (T+2:30 to 3:15)
+**Status: DONE.** Tracking only: waste never changes balances. A shared item's cost was usually already
+split in a grocery bill, so charging again for a toss would double-charge. CO2 and pounds are cut
+(no real per-item data); they can return later with a cited dataset.
+- setItemStatus writes the ledger: tossed = wasted; an at-risk item (within 48h, not past its date) eaten = rescued.
+- Cost is only what someone said they paid; `ledger.priced = 0` marks items with no price (never estimated).
+- get_waste_summary: this week and all time. The group sees household totals only (no items, no names);
+  a DM adds the sender's own personal items.
+- Done when: tosses and rescues are logged, balances are unchanged, and the group only sees totals.
+- Test: `bun test` (test/ledger.test.ts)
 
 ### Phase 6: P1b receipt photo (T+3:00 to 3:30), stretch; only if the spike shows attachments work
-**Status: BUILT (branch phase-6-receipts).** src/receipts/: download (Bearer retry, 10 MB cap, bytes never
+**Status: BUILT (branch phase-6-receipts).** src/receipts/: download (Bearer retry, bytes never
 stored), Gemini vision with a JSON schema, Zod validation, sum check within 1 cent, payment lines and 4+ digit
 runs dropped. The list is shown first; replies parsed in code: "yes", "Sam paid" (buyer), "2 is mine" /
 "3 is Jordan's" (kept items carry their share of tax), "total is $X", "cancel". On yes: expense (source receipt)
-plus fridge items with receipt prices; non-food lines (bag fee) stay out of the fridge. Terminal: /photo <path>.
+plus fridge items with receipt prices; non-food lines (bag fee) stay out of the fridge. Also "split with Sam only",
+"5 is me and Sam's", blurry lines filled from the total ("4 was bananas"), and whoever sent it can undo it.
+Terminal: /photo <path>.
 - Download inside the handler immediately (never log the URL), send to Gemini (image input), and validate
   the result with a Zod schema (items, prices, tax, discounts, total, store, date).
 - Code checks items + tax - discounts = total within 1 cent; otherwise it flags the mismatch.
@@ -134,7 +200,7 @@ plus fridge items with receipt prices; non-food lines (bag fee) stay out of the 
 |---|---|---|---|
 | 0:00–0:40 | spike.ts | dependency removal, config/preflight | schema, FoodKeeper, phone helpers |
 | 0:40–1:30 | claw/terminal adapters, outbox, projection, chat | agent loop, prompt, fallback | money/splits, undo, dedupe, seed |
-| 1:30–2:00 | wire expense flow into adapters | record_expense/undo/balances tools | shelf_life_lookup, prices.json |
+| 1:30–2:00 | wire expense flow into adapters | record_expense/undo/balances tools | shelf_life_lookup |
 | 2:00–2:45 | scheduler + time-travel | kitchen companion tools, prefs, recipe check | inventory tools, claims |
 | 2:30–3:15 | group reply rules, tapbacks | eval.ts | waste ledger, balances, CO2 |
 | 3:00–3:30 | receipt download (stretch) | vision + Zod (stretch) | receipt sum check, tax allocation |
@@ -172,6 +238,10 @@ Agree on these interfaces at T+0:40: the adapter types, the tool signatures, and
 
 The old events and jobs tables are dropped; the scheduler derives work from items and nudges.
 
+Added since the plan:
+- migration 2: `sends.body` and `sends.reply_to`, so deferred messages can be sent later
+- migration 3: `members.named` (0 until the roommate tells Thyme their name)
+
 ## Cut list (cut from the top first if we fall behind)
 1. P1b receipt photo
 2. scripts/eval.ts
@@ -181,7 +251,8 @@ The old events and jobs tables are dropped; the scheduler derives work from item
 6. 2s debounce and tapback acknowledgments (reply normally)
 7. HOUSEHOLD_MODE=dm fan-out (if the spike shows groups work)
 
-Never cut: integer-cent split math, conservative expiry, the privacy projection, quiet hours, caps.
+Never cut: integer-cent split math, conservative expiry, the privacy projection, caps.
+(Quiet hours were removed at the team's request: reminders go out whenever they're due.)
 
 ## Demo (3 min)
 1. The group texts "groceries were $48.60, split 3 ways, chicken thighs ($9) are just mine".
@@ -189,4 +260,5 @@ Never cut: integer-cent split math, conservative expiry, the privacy projection,
 2. Talk-to-log: "got spinach and milk", "tossed the leftover rice".
 3. `time-travel +2d`: the spinach reminder opens a conversation in the group, and a roommate claims it.
 4. "what can I make tonight?" returns a recipe using only fridge items.
-5. "what do I owe?" in DM shows one number that includes shared waste; the group sees household totals.
+5. "how much have we wasted?" in the group shows household totals; in a DM it adds your own items.
+   "what do I owe?" in DM shows grocery balances (waste is tracked, never charged).

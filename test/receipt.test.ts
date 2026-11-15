@@ -301,7 +301,7 @@ describe("receipt flow through the router", () => {
     const { db, say } = await app(async () => TJ);
     await say(PHONES[0]!, "", true);
     await say(PHONES[0]!, "Sam paid, split between me and Jordan");
-    await say(PHONES[0]!, "yes");
+    expect(await say(PHONES[0]!, "yes")).toContain("Sam isn't in on this one, so Sam is owed the full amount.");
     const sam = db.query<{ s: number }, []>("SELECT share_cents AS s FROM expense_shares WHERE member_id = 2").get();
     expect(sam?.s ?? 0).toBe(0);
     expect(balancesFor(db, 1, 2).netCents).toBe(2010);

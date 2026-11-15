@@ -396,7 +396,7 @@ function commitReceipt(ctx: ReceiptContext, p: PendingReceipt, allowDuplicate: b
   return [
     `Saved: ${formatCents(expense.totalCents)} paid by ${payer}.`,
     ...owes,
-    `${payer}'s own share is ${formatCents(payerShare)} (already paid).`,
+    payerShare > 0 ? `${payer}'s own share is ${formatCents(payerShare)} (already paid).` : `${payer} isn't in on this one, so ${payer} is owed the full amount.`,
     added ? `Added ${added} item${added === 1 ? "" : "s"} to the fridge list with their receipt prices.` : "",
     skipped.length ? `Not added to the fridge (not food): ${skipped.join(", ")}.` : "",
     unknown.length ? `Not added to the fridge (I don't know how long ${unknown.length === 1 ? "it keeps" : "they keep"}): ${unknown.join(", ")}. Tell me what ${unknown.length === 1 ? "it is" : "they are"} to add ${unknown.length === 1 ? "it" : "them"}.` : "",

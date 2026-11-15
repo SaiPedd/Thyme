@@ -42,6 +42,8 @@ export interface RouterDeps {
   botAliases?: string[];
   model: string;
   client: AgentInput["client"];
+  /** TheMealDB client for recipe ideas; omit for built-in recipes only. */
+  mealdb?: ToolContext["mealdb"];
   log?: (line: string) => void;
   /** Terminal mode: a stand-in group chat id that is accepted but never saved as the household chat. */
   devGroupChatId?: string;
@@ -243,7 +245,10 @@ export function makeRouter(deps: RouterDeps) {
     }
 
     const drafts: Draft[] = [];
-    const ctx: ToolContext = { db, household, members, member, isGroup: m.isGroup, messageId: m.messageId, chatId: m.chatId, sentAt: m.sentAt, drafts };
+    const ctx: ToolContext = {
+      db, household, members, member, isGroup: m.isGroup, messageId: m.messageId, chatId: m.chatId, sentAt: m.sentAt, drafts,
+      mealdb: deps.mealdb ?? null,
+    };
     const history = loadHistory(db, m.chatId);
     saveTurn(db, m.chatId, member, "user", shown, at);
 

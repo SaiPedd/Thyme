@@ -13,6 +13,7 @@
     "register-phones": "bun scripts/register-phones.ts",
     "seed": "bun scripts/seed.ts",
     "time-travel": "bun scripts/time-travel.ts",
+    "mealdb-warm": "bun scripts/mealdb-warm.ts",
     "chat": "bun index.ts --terminal"
   },
   "devDependencies": {

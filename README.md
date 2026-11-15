@@ -1,4 +1,4 @@
-# Meet Thyme
+# Thyme 🌿
 
 **Thyme** is an iMessage agent for roommates. Add it to your household group chat (or text it directly)
 and it splits grocery bills, keeps track of what's in the fridge before it spoils, answers kitchen
@@ -15,8 +15,8 @@ Full build plan: [PLAN.md](PLAN.md).
 | 1 | Bun WebSocket integration, Gemini Interactions loop, privacy and outbox | Done |
 | 2 | Expense splitting: split summary, recording expenses, undo, balances | Done |
 | 3 | Inventory and expiry tracking, reminders, claims on expiring food | Done |
-| 4 | Kitchen companion: recipes from what's in the fridge, saved preferences | Done |
-| 5 | Waste ledger: tosses and rescues, shared waste in the same balances | Done |
+| 4 | Kitchen companion: recipes from what's in the fridge (built-in + TheMealDB), saved preferences | Done |
+| 5 | Waste ledger: tosses and rescues, tracked (never charged to balances) | Done |
 | 6 | Receipt photos (stretch) | Built, needs a phone test |
 | 7 | Demo polish, eval script | Planned |
 
@@ -62,10 +62,11 @@ Thyme:  Cooked rice lasts 4-6 days in the fridge according to the USDA FoodKeepe
   9 AM about shared food expiring within 48 hours (personal food goes to the owner's DM), and "mine" claims it.
 - **Kitchen companion:** "what can I make?" suggests a recipe that only uses what's in the fridge, favoring food
   about to expire and honoring saved diets, dislikes, and allergies.
-- **Waste ledger:** "tossed the spinach" splits a shared item's cost into the same balances as groceries
-  (unless that day's groceries were already split). Eating something before it expires counts as a rescue.
-  "How much have we wasted?" shows dollars, pounds, and CO2; the group sees household totals only.
-  "undo" reverses the last expense or toss.
+- **Prices:** an item's price is only what a roommate said they paid ("got spinach for $4", or an expense
+  line like "chicken thighs ($9) are just mine"). No price given means unknown, never estimated.
+- **Waste ledger:** "tossed the spinach" is logged as wasted; eating food within 48h of its date is a rescue.
+  "How much have we wasted?" gives household totals in the group (no items or names) and adds your own items in a DM.
+  Waste is tracked, not charged: balances only come from grocery splits, so nobody pays twice.
 
 ## How it works
 
@@ -76,12 +77,14 @@ iMessage ── Claw Messenger ── WebSocket ──► inbox ──► router
                                                                                        shelf life)
                                                           │
                           outbox ◄── privacy projection ◄─┘
-             (quiet hours, caps, retries)  (group vs DM)
+             (caps, budget, retries)       (group vs DM)
 ```
 
 Design rules:
 
-- **Code owns every fact.** Gemini picks which tool to call and how to phrase the reply. Dollar amounts,
+- **Code owns every fact.** Questions whose answer is a list of facts ("what's in the fridge?", "what do I
+  owe?", "how much have we wasted?") are answered by code directly, without the model. A reply that claims
+  "I DM'd you" when nothing was sent is rejected. Otherwise, Gemini picks which tool to call and how to phrase the reply. Dollar amounts,
   shares, balances, and shelf-life days all come from code. A reply that states an amount or a
   duration that no tool returned is rejected and replaced with the tool's own wording.
 - **Privacy by construction.** Every outgoing message declares who it's for and whether it's personal.
@@ -90,7 +93,7 @@ Design rules:
 - **Never stuck.** If Gemini is off, slow (over 10 s), or fails, a rule-based parser handles the core
   messages ("groceries $30 split 3 ways", "undo", "what do I owe"). If a tool already ran, Thyme
   reports that result instead of running the action twice.
-- **Polite in a group.** Proactive messages respect quiet hours (10 PM to 8 AM), daily caps, and a
+- **Polite in a group.** Proactive messages respect daily caps and a
   monthly message budget. Replies to someone who just texted always go out right away.
 - **Money in integer cents.** Shares always add up exactly to the total. Leftover cents go to the person
   who paid. This is checked by a 2,000-case property test.
@@ -112,7 +115,7 @@ cp .env.example .env    # fill in the values; never commit .env
 | `GEMINI_MODEL` | Defaults to `gemini-3.5-flash-lite` |
 | `BOT_NAME` / `BOT_ALIASES` | The agent's name (default `Thyme`) and other names it answers to |
 | `HOUSEHOLD_MODE` | `group` (household lives in a group chat) or `dm` (group messages go to each roommate's DM) |
-| `HOUSEHOLD_TZ` | Time zone for quiet hours and reminders, e.g. `America/New_York` |
+| `HOUSEHOLD_TZ` | Time zone for the 9 AM reminders and dates, e.g. `America/New_York` |
 | `LLM` | `off` to use only the rule-based fallback |
 | `CLAW_TEST_NUMBERS` | Phones for the spike and phone registration, in `+1...` format |
 
@@ -124,11 +127,12 @@ Logs never contain message text or full phone numbers (only the last 4 digits).
 ```sh
 bun run spike            # check Claw connectivity, group chats, and photo attachments
 bun run register-phones  # register CLAW_TEST_NUMBERS with Claw
-bun run seed             # one household + a starting fridge; roommates join from the group chat
-bun run seed --demo      # fictional roommates (Alex, Sam, Jordan) for the terminal chat
+bun run seed             # reset: one household, empty kitchen; roommates join from the group chat
+bun run seed --demo      # fictional roommates (Alex, Sam, Jordan) and a starter fridge for the terminal chat
+bun run mealdb-warm      # pre-cache TheMealDB recipes for what's in the kitchen (run before a demo)
 bun run chat             # talk to Thyme in the terminal (/as <name>, /group, /dm, /photo <path>); sends no real messages
 bun start                # run Thyme on Claw Messenger (real iMessage)
-bun test                 # 156 tests
+bun test                 # all tests
 bun run typecheck
 ```
 
@@ -144,7 +148,7 @@ src/domain/              money, splits, expenses, household, foodkeeper, phone, 
                          recipes, prefs, prices, waste (ledger), impact (pounds and CO2)
 src/privacy/projection.ts  who can see what
 src/inbox.ts             dedupe, debounce, per-chat ordering
-src/outbox.ts            quiet hours, caps, budget, retries, delivery tracking
+src/outbox.ts            caps, budget, retries, delivery tracking
 src/receipts/            receipt photos: download, Gemini vision + Zod, sum check, who paid / whose items
 src/router.ts            members, group rules, names, replies
 src/db/                  SQLite schema and migrations
@@ -160,16 +164,18 @@ data/foodkeeper.json     USDA FoodKeeper data
 - **Shelf life:** [USDA FSIS FoodKeeper](https://catalog.data.gov/dataset/fsis-foodkeeper-data) (public domain).
   Imported into SQLite on first start. Expiry uses the conservative low end of each range. Foods where
   USDA gives guidance instead of a number (milk: "Package use-by date") keep that guidance.
-- **CO2 of wasted food:** category averages of kg CO2e per kg from Poore & Nemecek (2018), *Science*
-  360(6392), via [Our World in Data](https://ourworldindata.org/food-choice-vs-eating-local). Weights per
-  item are typical package sizes. Both are estimates, and Thyme says so.
-- **Price estimates:** `data/prices.json`, rough US grocery prices used until someone gives the real price.
+- **Recipes:** recipe data and imagery from [TheMealDB](https://www.themealdb.com/), plus 16 built-in recipes.
+  - Thyme searches TheMealDB for the food that's about to expire, and suggests recipes where you already have
+    half or more of the main ingredients. Pantry staples like salt, pepper, garlic and spices are assumed.
+  - It tells you exactly what else you'd need, and links the full recipe.
+  - Lookups are cached locally; run `bun run mealdb-warm` before a demo.
+  - Uses TheMealDB's free development key (`MEALDB_API_KEY=1`); a public release needs a supporter key.
 
 ## Known limitations
 
 - Receipt photos need `LLM=on`, and Claw must deliver downloadable attachments (check with `bun run spike`).
 - `/photo <path>` in the terminal chat doesn't support paths with spaces.
-- Waste costs use the price someone gave, or an estimate from `data/prices.json` when they didn't.
-- Pounds and CO2 are per-category estimates, not weighed amounts.
+- Waste totals are in dollars and item counts only; CO2 and weight are cut until there's a real, cited dataset.
+- Undoing an expense doesn't clear item prices that its line items set.
 - Group chats need both roommates' numbers registered with Claw first (`bun run register-phones`).
 - Thyme is also a herb, so "we're out of thyme" will get a reply.
