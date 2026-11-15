@@ -111,12 +111,12 @@ As built, and what changed from the plan:
 **Status: DONE.** add_item, use_item, log_toss, get_inventory, claim_item (agent + fallback rules);
 src/scheduler.ts (09:00 reminders, one retry, via the outbox); claims by sentAt (an earlier claim that
 arrives late takes over and the group is told); `time-travel` saves the clock offset in the state
-table so a running agent follows it within 5 s; data/prices.json. log_toss only marks the item;
-the ledger row and balances are Phase 5.
+table so a running agent follows it within 5 s. Item prices come only from what a roommate says they
+paid ("got spinach for $4", or an expense line item like "chicken thighs ($9)"); there are no estimates.
 - shelf_life_lookup (top 5 matches via FTS5). The model picks an id; code computes expires_at (low end).
   Ask raw or cooked when ambiguous.
-- add_item, use_item, log_toss, get_inventory; data/prices.json (~60 items) for estimates,
-  overridden by receipts or the user.
+- add_item, use_item, log_toss, get_inventory. An item's price is what the user said they paid, or
+  (Phase 6) the receipt line; otherwise it's unknown. Never estimated.
 - scheduler.ts: a daily 09:00 job (HOUSEHOLD_TZ) finds items expiring within 48h. Shared items
   go to the group, personal items to the owner's DM. One retry the next morning, then stop.
   Everything goes through the outbox.
@@ -160,26 +160,25 @@ confirmation, check_item, forget_me, and fallback rules for all of them.
 - **Reply:** includes the recipe link and the "Recipe from TheMealDB" credit.
 - **Toggle:** `MEALDB=off` turns it off.
 
-### Phase 5: P4 waste ledger and combined balances (T+2:30 to 3:15)
-**Status: DONE.** log_toss writes the ledger; a shared toss is split equally into balance_entries
-(source 'waste'), except when the buyer already logged an expense the day the item was added (no
-double charge). Rescues are logged from use_item and cooked_recipe. undo_last reverses the newer of
-the last expense or toss. get_waste_summary gives $, lb, and CO2 (src/domain/impact.ts); the group gets
-household totals only.
-- log_toss writes a ledger row. A personal toss costs the owner. A shared toss is split equally,
-  and each non-buyer owes the buyer their share. An at-risk item (within 48h) eaten = rescued.
-- Same balance_entries table as expenses. "what do I owe?" returns one number plus a breakdown, in DM.
-- CO2 from a hardcoded per-category factor, with the source cited in code and the README.
-- The group sees household totals only.
-- Done when: tossing a shared item changes everyone's balance correctly, and the group only sees totals.
-- Test: `bun test`
+### Phase 5: P4 waste ledger (T+2:30 to 3:15)
+**Status: DONE.** Tracking only: waste never changes balances. A shared item's cost was usually already
+split in a grocery bill, so charging again for a toss would double-charge. CO2 and pounds are cut
+(no real per-item data); they can return later with a cited dataset.
+- setItemStatus writes the ledger: tossed = wasted; an at-risk item (within 48h, not past its date) eaten = rescued.
+- Cost is only what someone said they paid; `ledger.priced = 0` marks items with no price (never estimated).
+- get_waste_summary: this week and all time. The group sees household totals only (no items, no names);
+  a DM adds the sender's own personal items.
+- Done when: tosses and rescues are logged, balances are unchanged, and the group only sees totals.
+- Test: `bun test` (test/ledger.test.ts)
 
 ### Phase 6: P1b receipt photo (T+3:00 to 3:30), stretch; only if the spike shows attachments work
-**Status: BUILT (branch phase-6-receipts).** src/receipts/: download (Bearer retry, 10 MB cap, bytes never
+**Status: BUILT (branch phase-6-receipts).** src/receipts/: download (Bearer retry, bytes never
 stored), Gemini vision with a JSON schema, Zod validation, sum check within 1 cent, payment lines and 4+ digit
 runs dropped. The list is shown first; replies parsed in code: "yes", "Sam paid" (buyer), "2 is mine" /
 "3 is Jordan's" (kept items carry their share of tax), "total is $X", "cancel". On yes: expense (source receipt)
-plus fridge items with receipt prices; non-food lines (bag fee) stay out of the fridge. Terminal: /photo <path>.
+plus fridge items with receipt prices; non-food lines (bag fee) stay out of the fridge. Also "split with Sam only",
+"5 is me and Sam's", blurry lines filled from the total ("4 was bananas"), and whoever sent it can undo it.
+Terminal: /photo <path>.
 - Download inside the handler immediately (never log the URL), send to Gemini (image input), and validate
   the result with a Zod schema (items, prices, tax, discounts, total, store, date).
 - Code checks items + tax - discounts = total within 1 cent; otherwise it flags the mismatch.
@@ -201,7 +200,7 @@ plus fridge items with receipt prices; non-food lines (bag fee) stay out of the 
 |---|---|---|---|
 | 0:00–0:40 | spike.ts | dependency removal, config/preflight | schema, FoodKeeper, phone helpers |
 | 0:40–1:30 | claw/terminal adapters, outbox, projection, chat | agent loop, prompt, fallback | money/splits, undo, dedupe, seed |
-| 1:30–2:00 | wire expense flow into adapters | record_expense/undo/balances tools | shelf_life_lookup, prices.json |
+| 1:30–2:00 | wire expense flow into adapters | record_expense/undo/balances tools | shelf_life_lookup |
 | 2:00–2:45 | scheduler + time-travel | kitchen companion tools, prefs, recipe check | inventory tools, claims |
 | 2:30–3:15 | group reply rules, tapbacks | eval.ts | waste ledger, balances, CO2 |
 | 3:00–3:30 | receipt download (stretch) | vision + Zod (stretch) | receipt sum check, tax allocation |
@@ -252,7 +251,8 @@ Added since the plan:
 6. 2s debounce and tapback acknowledgments (reply normally)
 7. HOUSEHOLD_MODE=dm fan-out (if the spike shows groups work)
 
-Never cut: integer-cent split math, conservative expiry, the privacy projection, quiet hours, caps.
+Never cut: integer-cent split math, conservative expiry, the privacy projection, caps.
+(Quiet hours were removed at the team's request: reminders go out whenever they're due.)
 
 ## Demo (3 min)
 1. The group texts "groceries were $48.60, split 3 ways, chicken thighs ($9) are just mine".
@@ -260,4 +260,5 @@ Never cut: integer-cent split math, conservative expiry, the privacy projection,
 2. Talk-to-log: "got spinach and milk", "tossed the leftover rice".
 3. `time-travel +2d`: the spinach reminder opens a conversation in the group, and a roommate claims it.
 4. "what can I make tonight?" returns a recipe using only fridge items.
-5. "what do I owe?" in DM shows one number that includes shared waste; the group sees household totals.
+5. "how much have we wasted?" in the group shows household totals; in a DM it adds your own items.
+   "what do I owe?" in DM shows grocery balances (waste is tracked, never charged).

@@ -213,7 +213,12 @@ CREATE TABLE mealdb_by_ingredient (
   fetched_at  TEXT NOT NULL
 );
 `,
-  // 5: who logged an expense (may differ from the buyer: "Sam paid"), so the logger can undo it.
+  // 5: waste ledger. priced = 0 when nobody said what the item cost (cost_cents is then 0, not a guess).
+  `
+ALTER TABLE ledger ADD COLUMN priced INTEGER NOT NULL DEFAULT 0 CHECK (priced IN (0,1));
+CREATE INDEX ledger_by_household ON ledger(household_id, kind, at);
+`,
+  // 6: who logged an expense (may differ from the buyer: "Sam paid"), so the logger can undo it.
   `
 ALTER TABLE expenses ADD COLUMN logged_by_member_id INTEGER REFERENCES members(id);
 `,

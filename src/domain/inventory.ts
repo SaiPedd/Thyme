@@ -4,8 +4,8 @@
 import type { Database } from "bun:sqlite";
 import { now } from "../clock";
 import { localDate } from "./expenses";
+import { recordLedger } from "./ledger";
 import { defaultStorage, expiryFor, getShelfLife, pickShelfLife, shelfLifeNote, type ShelfLifeRow, type Storage } from "./foodkeeper";
-import { estimatePriceCents } from "./prices";
 
 /** Items expiring within this window are "at risk": reminders, claims, and rescues. */
 export const AT_RISK_MS = 48 * 60 * 60 * 1000;
@@ -58,8 +58,8 @@ export function addItem(db: Database, input: AddItemInput): AddItemResult {
   const storage = input.storage ?? defaultStorage(row);
   const at = now();
   const expires = expiryFor(row, storage, at);
-  const estimate = input.priceCents == null ? estimatePriceCents(input.name) : null;
-  const cost = input.priceCents ?? estimate;
+  // Prices come only from what a roommate said they paid (or, later, a receipt). Never estimated.
+  const cost = input.priceCents ?? null;
   const item = db
     .query<Item, [number, string, number, string, number | null, number, number | null, string | null, string, string | null]>(
       `INSERT INTO items (household_id, name, shelf_life_id, storage, owner_member_id, buyer_member_id, qty, cost_cents, cost_source, added_at, expires_at, status)
@@ -73,11 +73,16 @@ export function addItem(db: Database, input: AddItemInput): AddItemResult {
       input.ownerId,
       input.buyerId,
       cost,
-      cost === null ? null : input.priceCents != null ? (input.costSource ?? "user") : "estimate",
+      cost === null ? null : (input.costSource ?? "user"),
       at.toISOString(),
       expires?.toISOString() ?? null,
     )!;
   return { ok: true, item, food: foodLabel(row), note: expires ? null : shelfLifeNote(row, storage) };
+}
+
+/** Set an item's price from what a roommate said they paid, or from a receipt. */
+export function setItemPrice(db: Database, itemId: number, cents: number, source: "user" | "receipt"): void {
+  db.run("UPDATE items SET cost_cents = ?, cost_source = ? WHERE id = ?", [cents, source, itemId]);
 }
 
 /** Whole local days from today until the expiry date (0 = today, negative = past). */
@@ -144,30 +149,50 @@ export function nameWords(s: string): string[] {
   return (s.toLowerCase().match(/[a-z0-9]+/g) ?? []).filter((w) => !STOP.has(w)).map(singular);
 }
 
+/** How well a phrase names an item: 3 exact, 2 the phrase is part of the name, 1.5 the name is part of the phrase, else partial; 0 = no shared word. */
+export function matchScore(name: string, phrase: string): number {
+  const q = nameWords(phrase);
+  const w = nameWords(name);
+  const overlap = q.filter((x) => w.includes(x)).length;
+  if (overlap === 0) return 0;
+  return overlap === q.length && overlap === w.length ? 3 : overlap === q.length ? 2 : overlap === w.length ? 1.5 : overlap / Math.max(q.length, w.length);
+}
+
 /** Best match for "the spinach" among the given items; null if nothing shares a word. Ties go to the soonest expiry. */
 export function matchItem<T extends Pick<Item, "name">>(items: T[], phrase: string): T | null {
-  const q = nameWords(phrase);
-  if (q.length === 0) return null;
   let best: { item: T; score: number } | null = null;
   for (const item of items) {
-    const w = nameWords(item.name);
-    const overlap = q.filter((x) => w.includes(x)).length;
-    if (overlap === 0) continue;
-    const score =
-      overlap === q.length && overlap === w.length ? 3 : overlap === q.length ? 2 : overlap === w.length ? 1.5 : overlap / Math.max(q.length, w.length);
-    if (!best || score > best.score) best = { item, score };
+    const score = matchScore(item.name, phrase);
+    if (score > 0 && (!best || score > best.score)) best = { item, score };
   }
   return best?.item ?? null;
+}
+
+/** An item this phrase names at least as well as `than`, that was marked used/tossed in the last few minutes. */
+export function recentlyChanged(db: Database, householdId: number, status: "used" | "tossed", phrase: string, than: Item, withinMs = 10 * 60_000): Item | null {
+  const since = new Date(now().getTime() - withinMs).toISOString();
+  const recent = db
+    .query<Item, [number, string, string]>("SELECT * FROM items WHERE household_id = ? AND status = ? AND status_at >= ? ORDER BY status_at DESC")
+    .all(householdId, status, since);
+  const best = matchItem(recent, phrase);
+  return best && matchScore(best.name, phrase) >= matchScore(than.name, phrase) ? best : null;
 }
 
 export function findItem(db: Database, householdId: number, memberId: number, phrase: string, opts: { sharedOnly?: boolean } = {}): Item | null {
   return matchItem(visibleItems(db, householdId, memberId, opts), phrase);
 }
 
-/** Mark an item used or tossed, and close any open reminder for it. */
-export function setItemStatus(db: Database, itemId: number, status: "used" | "tossed"): void {
+/**
+ * Mark an item used or tossed, close any open reminder for it, and write the waste ledger:
+ * tossed = wasted; used while at risk (within 48h) and not past its date = rescued.
+ * `by` is the member who did it.
+ */
+export function setItemStatus(db: Database, itemId: number, status: "used" | "tossed", by: number | null = null): void {
   const at = now().toISOString();
   db.transaction(() => {
+    const item = db.query<Item, [number]>("SELECT * FROM items WHERE id = ? AND status = 'fresh'").get(itemId);
+    if (item && status === "tossed") recordLedger(db, item, "wasted", by);
+    else if (item && isAtRisk(item) && !isPast(item)) recordLedger(db, item, "rescued", by);
     db.run("UPDATE items SET status = ?, status_at = ? WHERE id = ?", [status, at, itemId]);
     db.run("UPDATE nudges SET responded_at = ? WHERE item_id = ? AND responded_at IS NULL", [at, itemId]);
   })();

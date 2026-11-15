@@ -1,12 +1,11 @@
 import { afterEach, beforeAll, describe, expect, test } from "bun:test";
 import type { Database } from "bun:sqlite";
-import { describeToolResult, parseIntent } from "../src/agent/fallback";
+import { describeToolResult, parseIntent, runFallback } from "../src/agent/fallback";
 import { runTool, type ToolContext } from "../src/agent/tools";
 import { addDays, resetClock, setNow } from "../src/clock";
 import { getShelfLife, importFoodKeeperFile, pickShelfLife } from "../src/domain/foodkeeper";
 import { getHousehold, getMembers } from "../src/domain/household";
 import { addItem, expiryPhrase, matchItem } from "../src/domain/inventory";
-import { estimatePriceCents } from "../src/domain/prices";
 import { setupHousehold } from "./helpers";
 
 // 10:00 in New York.
@@ -75,12 +74,28 @@ describe("conservative expiry from FoodKeeper", () => {
     expect(addItem(db, { householdId: 1, name: "paper towels", buyerId: 1, ownerId: null })).toEqual({ ok: false, reason: "no_match" });
   });
 
-  test("price: user's number wins, else an estimate, labeled", () => {
-    const est = addItem(db, { householdId: 1, name: "bananas", buyerId: 1, ownerId: null });
+  test("price: only what the person said they paid; never estimated", () => {
+    const none = addItem(db, { householdId: 1, name: "bananas", buyerId: 1, ownerId: null });
     const user = addItem(db, { householdId: 1, name: "bananas", buyerId: 1, ownerId: null, priceCents: 250 });
-    if (!est.ok || !user.ok) throw new Error("not added");
-    expect([est.item.cost_cents, est.item.cost_source]).toEqual([estimatePriceCents("bananas"), "estimate"]);
+    if (!none.ok || !user.ok) throw new Error("not added");
+    expect([none.item.cost_cents, none.item.cost_source]).toEqual([null, null]);
     expect([user.item.cost_cents, user.item.cost_source]).toEqual([250, "user"]);
+  });
+
+  test("an expense line item prices the matching fridge item", async () => {
+    const db2 = await withFoodKeeper();
+    setNow(T0);
+    const ctx = ctxFor(db2, 0, true);
+    runTool("add_item", { items: [{ name: "chicken thighs", state: "raw" }, { name: "spinach", state: "raw" }] }, ctx);
+    const r = runTool("record_expense", { total: "$30", items: [{ description: "chicken thighs", amount: "$9", members: ["me"] }] }, ctx);
+    expect(r).toMatchObject({ recorded: true, item_prices_set: ["chicken thighs"] });
+    const rows = db2.query<{ name: string; cost_cents: number | null; cost_source: string | null }, []>(
+      "SELECT name, cost_cents, cost_source FROM items ORDER BY id",
+    ).all();
+    expect(rows).toEqual([
+      { name: "chicken thighs", cost_cents: 900, cost_source: "user" },
+      { name: "spinach", cost_cents: null, cost_source: null },
+    ]);
   });
 });
 
@@ -149,15 +164,59 @@ describe("inventory tools and privacy", () => {
   });
 });
 
+describe("buy, then ask what's there", () => {
+  test("'I bought ...' then 'what is in my fridge?' lists it with where it's kept", async () => {
+    const db = await withFoodKeeper();
+    setNow(T0);
+    const ctx = ctxFor(db, 0, true);
+    await runFallback("I bought spinach and rice", ctx);
+    const reply = (await runFallback("what is in my fridge?", ctx))!;
+    expect(reply).toContain("- spinach (fridge): expires in");
+    expect(reply).toContain("- rice (pantry):");
+  });
+
+  test("'i just bought ...' is a food log (it was silently ignored before)", () => {
+    expect(parseIntent("i just bought strawberries, bell peppers and greek yogurt")).toEqual({
+      kind: "add",
+      items: [{ name: "strawberries" }, { name: "bell peppers" }, { name: "greek yogurt" }],
+    });
+    expect(parseIntent("i threw the chicken thighs")).toEqual({ kind: "toss", item: "chicken thighs" });
+    expect(parseIntent("we just tossed the milk")).toEqual({ kind: "toss", item: "milk" });
+    expect(parseIntent("threw a party last night")).toBeNull();
+  });
+
+  test("tossing the same food twice doesn't toss a second, different item", async () => {
+    const db = await withFoodKeeper();
+    setNow(T0);
+    const ctx = ctxFor(db, 0, true);
+    runTool("add_item", { items: [{ name: "baby spinach", state: "raw" }, { name: "spinach", state: "raw" }] }, ctx);
+    expect(runTool("log_toss", { item: "spinach" }, ctx)).toMatchObject({ done: true, item: "spinach" });
+    // "no like i threw it out" -> the model calls log_toss("spinach") again.
+    expect(runTool("log_toss", { item: "spinach" }, ctx)).toMatchObject({ done: false, already: "spinach" });
+    // Naming the other one still works.
+    expect(runTool("log_toss", { item: "baby spinach" }, ctx)).toMatchObject({ done: true, item: "baby spinach" });
+    // And after a while, "tossed the spinach" means the next one again.
+    runTool("add_item", { items: [{ name: "spinach", state: "raw" }] }, ctx);
+    setNow(addDays(T0, 1));
+    expect(runTool("log_toss", { item: "spinach" }, ctx)).toMatchObject({ done: true });
+  });
+});
+
 describe("fallback rules for food", () => {
   test("parses inventory questions, claims, and logs; ignores 'got it'", () => {
     expect(parseIntent("what's in the fridge?")).toEqual({ kind: "inventory" });
     expect(parseIntent("what's expiring")).toEqual({ kind: "inventory" });
+    for (const q of ["what is in my fridge?", "whats in my pantry", "what do I have", "what food do we have?", "show me the fridge", "what's left"]) {
+      expect(parseIntent(q)).toEqual({ kind: "inventory" });
+    }
     expect(parseIntent("mine!")).toEqual({ kind: "claim" });
     expect(parseIntent("I'll take it")).toEqual({ kind: "claim" });
     expect(parseIntent("I'll take the spinach")).toEqual({ kind: "claim", item: "spinach" });
     expect(parseIntent("dibs on the bananas")).toEqual({ kind: "claim", item: "bananas" });
-    expect(parseIntent("got spinach and milk")).toEqual({ kind: "add", items: ["spinach", "milk"] });
+    expect(parseIntent("got spinach and milk")).toEqual({ kind: "add", items: [{ name: "spinach" }, { name: "milk" }] });
+    expect(parseIntent("got spinach for $4")).toEqual({ kind: "add", items: [{ name: "spinach", price: "$4" }] });
+    expect(parseIntent("got eggs ($4.49) and milk")).toEqual({ kind: "add", items: [{ name: "eggs", price: "$4.49" }, { name: "milk" }] });
+    expect(parseIntent("bought bananas $1.79.")).toEqual({ kind: "add", items: [{ name: "bananas", price: "$1.79" }] });
     expect(parseIntent("got it")).toBeNull();
     expect(parseIntent("tossed the leftover rice")).toEqual({ kind: "toss", item: "leftover rice" });
   });

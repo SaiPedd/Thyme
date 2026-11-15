@@ -11,10 +11,11 @@ export type Intent =
   | { kind: "expense"; total: string; ways?: number; mineItems: { description: string; amount: string }[] }
   | { kind: "undo" }
   | { kind: "balances" }
-  | { kind: "add"; items: string[] }
+  | { kind: "add"; items: { name: string; price?: string }[] }
   | { kind: "use"; item: string }
   | { kind: "toss"; item: string }
   | { kind: "inventory" }
+  | { kind: "waste" }
   | { kind: "claim"; item?: string }
   | { kind: "recipe"; another?: boolean }
   | { kind: "cooked" }
@@ -22,19 +23,25 @@ export type Intent =
   | { kind: "pref"; pref: "diet" | "dislike" | "allergy" | "like"; value: string }
   | { kind: "my_prefs" }
   | { kind: "forget" }
-  | { kind: "check"; item: string }
-  | { kind: "waste" };
+  | { kind: "check"; item: string };
 
 const WORDS: Record<string, number> = { two: 2, three: 3, four: 4, five: 5, six: 6 };
 
 /** Words that follow "got" but aren't food ("got it", "got home"). */
 const NOT_FOOD = new Set(["it", "this", "that", "them", "you", "home", "back", "here", "there", "paid", "time", "one", "nothing", "everything", "him", "her", "people", "mondays"]);
 
-function splitList(s: string): string[] {
+/** A price the person said they paid, after an item: "spinach for $4", "spinach ($4)", "spinach $4". */
+const ITEM_PRICE = /^(.*?)\s*(?:\(\s*(\$\s?\d+(?:\.\d{1,2})?)\s*\)|(?:for\s+)?(\$\s?\d+(?:\.\d{1,2})?))$/i;
+
+function splitList(s: string): { name: string; price?: string }[] {
   return s
     .split(/,|\band\b|&|\+/i)
-    .map((x) => x.replace(/^\s*(some|a|an|the)\s+/i, "").replace(/[.!?]+$/, "").trim())
-    .filter((x) => x && !NOT_FOOD.has(x.toLowerCase()));
+    .map((x) => x.replace(/^\s*(some|a|an|the)\s+/i, "").replace(/[!?]+$/, "").replace(/\.$/, "").trim())
+    .map((x) => {
+      const m = x.match(ITEM_PRICE);
+      return m && m[1]!.trim() ? { name: m[1]!.trim(), price: (m[2] ?? m[3])!.replace(/\s/g, "") } : { name: x };
+    })
+    .filter((x) => x.name && !NOT_FOOD.has(x.name.toLowerCase()));
 }
 
 const cleanItem = (s: string) => s.replace(/[.!?]+$/, "").trim();
@@ -45,7 +52,6 @@ export function parseIntent(raw: string, botName = ""): Intent | null {
   const t = text.toLowerCase();
 
   if (/^(undo|scratch that|nvm undo)\b/.test(t)) return { kind: "undo" };
-  if (/\b(how much (food )?(have|did) (we|i) (waste|wasted|toss|tossed|throw)|waste (report|summary|stats)|how much (food )?waste)/.test(t)) return { kind: "waste" };
   if (/\b(what do i owe|who owes me|my balance|balances?\??$)/.test(t)) return { kind: "balances" };
 
   const money = text.match(/\$\s?\d[\d,]*(?:\.\d{1,2})?/);
@@ -86,21 +92,32 @@ export function parseIntent(raw: string, botName = ""): Intent | null {
   p = t.match(/^(?:is|are) (?:the |my |our |this |that )?(.+?) (?:still )?(?:good|ok|okay|safe|fine)(?: to eat)?\b|^how long (?:does|do|will|can) (?:the |my |our )?(.+?) (?:last|keep|stay good)\b|^(?:has|have) (?:the |my )?(.+?) gone bad\b/);
   if (p) return { kind: "check", item: cleanItem(p[1] ?? p[2] ?? p[3]!) };
 
-  if (/\b(what'?s|what is|whats)\s+(in\s+(the\s+|our\s+)?(fridge|pantry|freezer|kitchen)|expiring|going bad)|\bwhat (food )?do we have\b|\binventory\b/.test(t)) {
+  if (/\bhow much (food )?(have|did|do) (we|i) (waste|wasted|throw out|thrown out|toss|tossed)\b|\bwhat (have|did) we (waste|wasted|throw out|toss)\b|\bwaste (report|summary|ledger|stats)\b/.test(t)) {
+    return { kind: "waste" };
+  }
+  const PLACE = "(fridge|pantry|freezer|kitchen|inventory)";
+  if (
+    new RegExp(
+      `\\b(what'?s|what is|whats|what all is)\\s+(in\\s+(the\\s+|our\\s+|my\\s+)?${PLACE}|expiring|going bad|left)` +
+        `|\\bwhat (food )?(do|have) (we|i) (have|got)\\b` +
+        `|\\b(show|list|check)( me)? (the |our |my )?${PLACE}` +
+        `|\\binventory\\b`,
+    ).test(t)
+  ) {
     return { kind: "inventory" };
   }
   if (/^(mine|dibs|i'?ll take (it|them)|i want (it|them)|i'?ll have (it|them)|claim(ing)? (it|them))[\s!.]*$/.test(t)) return { kind: "claim" };
   let m = text.match(/^(?:i'?ll take|i will take|dibs on|i call|i'?ll eat|claiming|i want)\s+(?:the\s+)?(.+)/i);
   if (m) return { kind: "claim", item: cleanItem(m[1]!) };
 
-  m = text.match(/^(?:i\s+)?(?:got|bought|picked up|grabbed)\s+(.+)/i);
+  m = text.match(/^(?:i\s+|we\s+)?(?:just\s+)?(?:got|bought|picked up|grabbed)\s+(.+)/i);
   if (m) {
     const items = splitList(m[1]!);
     return items.length ? { kind: "add", items } : null;
   }
-  m = text.match(/^(?:i\s+)?(?:used|finished|ate)\s+(?:up\s+)?(?:the\s+)?(?:last\s+of\s+(?:the\s+)?)?(.+)/i);
+  m = text.match(/^(?:i\s+|we\s+)?(?:just\s+)?(?:used|finished|ate)\s+(?:up\s+)?(?:the\s+)?(?:last\s+of\s+(?:the\s+)?)?(.+)/i);
   if (m) return { kind: "use", item: cleanItem(m[1]!) };
-  m = text.match(/^(?:i\s+)?(?:tossed|threw out|threw away|binned|trashed)\s+(?:out\s+)?(?:the\s+)?(.+)/i);
+  m = text.match(/^(?:i\s+|we\s+)?(?:just\s+)?(?:tossed|threw out|threw away|threw(?=\s+(?:the|my|our|some)\s)|binned|trashed)\s+(?:out\s+)?(?:the\s+|my\s+|our\s+|some\s+)?(.+)/i);
   if (m) return { kind: "toss", item: cleanItem(m[1]!) };
   return null;
 }
@@ -136,33 +153,33 @@ export function describeToolResult(name: string, r: Record<string, any>): string
       return lines.join("\n") || "I didn't catch which food that was.";
     }
     case "use_item":
+      if (r.already) return `The ${r.already} is already marked as used.`;
       if (!r.done) return `I don't see that in the fridge list.`;
       return r.rescued ? `Nice save! The ${r.item} was about to expire. Marked as used.` : `Marked the ${r.item} as used.`;
-    case "log_toss": {
+    case "log_toss":
+      if (r.already) return `The ${r.already} is already marked as tossed.`;
       if (!r.done) return `I don't see that in the fridge list.`;
-      if (r.sent_privately) return "Logged. I DM'd you the details.";
-      const owes = (r.who_owes_whom as string[] | undefined) ?? [];
-      return [
-        `Logged the ${r.item} as tossed${r.cost !== "unknown" ? ` (${r.cost})` : ""}.`,
-        ...owes,
-        ...(r.note ? [String(r.note)] : []),
-        `Reply "undo" if that was a mistake.`,
-      ].join("\n");
-    }
+      return r.wasted_cost ? `Marked the ${r.item} as tossed (${r.wasted_cost} of food wasted).` : `Marked the ${r.item} as tossed.`;
     case "get_waste_summary": {
-      type T = { items: number; dollars: string; weight: string; climate: string };
-      const line = (label: string, x: { tossed: T; rescued: T }) =>
-        `${label}: tossed ${x.tossed.items} (${x.tossed.dollars}, about ${x.tossed.weight}, ${x.tossed.climate}); rescued ${x.rescued.items} (${x.rescued.dollars}, about ${x.rescued.weight}).`;
+      type T = { items: number; known_cost: string; items_with_no_price?: number };
+      const part = (label: string, t: T) =>
+        `${label} ${t.items} item${t.items === 1 ? "" : "s"}` +
+        (t.items ? ` (${t.known_cost}${t.items_with_no_price ? `, plus ${t.items_with_no_price} with no price` : ""})` : "");
+      const period = (label: string, p: { wasted: T; rescued: T }) => `${label}: ${part("wasted", p.wasted)}, ${part("rescued", p.rescued)}.`;
+      const h = r.household as { this_week: { wasted: T; rescued: T }; all_time: { wasted: T; rescued: T } };
+      const y = r.yours as typeof h | undefined;
       return [
-        line("This month, the house", r.household_this_month),
-        ...(r.you_this_month ? [line("You this month", r.you_this_month)] : []),
-        "Pounds and CO2 are estimates by food type.",
+        "Household food waste:",
+        period("This week", h.this_week),
+        period("All time", h.all_time),
+        ...(y ? ["Your own items:", period("This week", y.this_week), period("All time", y.all_time)] : []),
       ].join("\n");
     }
     case "get_inventory": {
-      const fmt = (xs: { item: string; status: string }[]) => xs.map((x) => `- ${x.item}: ${x.status}`);
-      const shared = (r.shared as { item: string; status: string }[] | undefined) ?? [];
-      const yours = (r.yours as { item: string; status: string }[] | undefined) ?? [];
+      type Line = { item: string; status: string; storage: string };
+      const fmt = (xs: Line[]) => xs.map((x) => `- ${x.item} (${x.storage}): ${x.status}`);
+      const shared = (r.shared as Line[] | undefined) ?? [];
+      const yours = (r.yours as Line[] | undefined) ?? [];
       if (!shared.length && !yours.length) return "Nothing's logged yet. Tell me what you bought, like \"got spinach and milk\".";
       return [
         ...(shared.length ? ["In the kitchen (soonest first):", ...fmt(shared)] : []),
@@ -268,13 +285,18 @@ export async function runFallback(text: string, ctx: ToolContext, botName = ""):
     }
     case "add":
       // Things someone says they got are groceries, so raw.
-      return describeToolResult("add_item", await runToolAsync("add_item", { items: intent.items.map((name) => ({ name, state: "raw" })) }, ctx));
+      return describeToolResult(
+        "add_item",
+        await runToolAsync("add_item", { items: intent.items.map((i) => ({ name: i.name, state: "raw", ...(i.price ? { price: i.price } : {}) })) }, ctx),
+      );
     case "use":
       return describeToolResult("use_item", await runToolAsync("use_item", { item: intent.item }, ctx));
     case "toss":
       return describeToolResult("log_toss", await runToolAsync("log_toss", { item: intent.item }, ctx));
     case "inventory":
       return describeToolResult("get_inventory", await runToolAsync("get_inventory", {}, ctx));
+    case "waste":
+      return describeToolResult("get_waste_summary", await runToolAsync("get_waste_summary", {}, ctx));
     case "claim":
       return describeToolResult("claim_item", await runToolAsync("claim_item", intent.item ? { item: intent.item } : {}, ctx));
     case "recipe":
@@ -291,7 +313,5 @@ export async function runFallback(text: string, ctx: ToolContext, botName = ""):
       return describeToolResult("forget_me", await runToolAsync("forget_me", {}, ctx));
     case "check":
       return describeToolResult("check_item", await runToolAsync("check_item", { item: intent.item }, ctx));
-    case "waste":
-      return describeToolResult("get_waste_summary", await runToolAsync("get_waste_summary", {}, ctx));
   }
 }
