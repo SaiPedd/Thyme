@@ -268,17 +268,18 @@ function renameBlurry(p: PendingReceipt, text: string, members: Member[], sender
 }
 
 /**
- * "3 was 6.49" / "3 is $6.49" / "item 3 costs 6": corrects one line's price, then re-checks the sum
+ * "3 was 6.49" / "3 is $6.49" / "item 3 costs 6" / "3 was free": corrects one line's price (even to $0), then re-checks the sum
  * against the printed total.
  */
 function setPrice(p: PendingReceipt, text: string): number | null {
   const t = text.trim().replace(/[.!]+$/, "").toLowerCase();
-  const m = /^(?:(?:item|line)\s*|#)?(\d{1,2})\s+(?:is|was|=|costs?|cost|should be|is actually|was actually)\s+(\$?\s?\d[\d,]*(?:\.\d{1,2})?)$/.exec(t);
+  const m = /^(?:(?:item|line)\s*|#)?(\d{1,2})\s+(?:is|was|=|costs?|cost|should be|is actually|was actually)\s+(\$?\s?\d[\d,]*(?:\.\d{1,2})?|free|nothing|zero)$/.exec(t);
   if (!m) return null;
   const index = Number(m[1]) - 1;
   const line = p.items[index];
-  const cents = parseCents(m[2]!);
-  if (!line || !cents) return null;
+  // $0 is a real price (a free item, or a line that was misread): only "couldn't read it" is null.
+  const cents = /^(free|nothing|zero)$/.test(m[2]!) ? 0 : parseCents(m[2]!);
+  if (!line || cents === null) return null;
   line.cents = cents;
   line.inferred = false;
   const itemsCents = p.items.reduce((s, i) => s + i.cents, 0);
@@ -287,10 +288,40 @@ function setPrice(p: PendingReceipt, text: string): number | null {
   return index;
 }
 
+/**
+ * "remove 3" / "delete line 3" / "take off 3 and 5" / "3 isn't on the receipt": drops misread lines
+ * before saving. Returns the removed names, or null if the message isn't a removal.
+ */
+function removeLines(p: PendingReceipt, text: string): { removed: string[] } | { error: string } | null {
+  const t = text.trim().replace(/[.!]+$/, "").toLowerCase();
+  const list = String.raw`(?:items?|lines?|#)?\s*(\d{1,2}(?:\s*(?:,|and|&|\+)\s*#?\d{1,2})*)`;
+  const m =
+    new RegExp(String.raw`^(?:remove|delete|drop|cross off|cross out|take off|take out|get rid of|scratch)\s+${list}(?:\s+(?:from|off)\s+(?:the\s+)?(?:list|receipt))?$`).exec(t) ??
+    new RegExp(String.raw`^${list}\s+(?:isn'?t|wasn'?t|is not|was not)\s+(?:on\s+(?:the|my|it|this)|(?:a\s+)?real|mine to (?:pay|split)|there)(?:\s+(?:receipt|list))?$`).exec(t);
+  if (!m) return null;
+  const nums = [...new Set((m[1]!.match(/\d+/g) ?? []).map(Number))];
+  const bad = nums.filter((n) => n < 1 || n > p.items.length);
+  if (bad.length) return { error: `The receipt only has items 1 to ${p.items.length}. Which did you mean?` };
+  if (nums.length >= p.items.length) return { error: `That would remove every item. Reply "cancel" to drop the whole receipt.` };
+  const removed = nums.map((n) => p.items[n - 1]!.name);
+  p.items = p.items.filter((_, i) => !nums.includes(i + 1));
+  const itemsCents = p.items.reduce((s, i) => s + i.cents, 0);
+  p.diffCents = itemsCents - p.discountCents + p.taxCents - p.totalCents;
+  p.balanced = p.totalCents > 0 && Math.abs(p.diffCents) <= 1;
+  return { removed };
+}
+
 /** Handle a reply to the sender's pending receipt. Returns the reply text, or null if not about the receipt. */
 export function handleReceiptReply(ctx: ReceiptContext, text: string): string | null {
   const p = getPendingReceipt(ctx.db, ctx.member.id);
   if (!p) return null;
+  const removal = removeLines(p, text);
+  if (removal && "error" in removal) return removal.error;
+  if (removal) {
+    p.at = now().toISOString();
+    savePendingReceipt(ctx.db, p);
+    return `Removed ${list(removal.removed)}.\n${receiptSummary(p, ctx.members)}`;
+  }
   if (setPrice(p, text) !== null || renameBlurry(p, text, ctx.members, ctx.member.id) !== null) {
     p.at = now().toISOString();
     savePendingReceipt(ctx.db, p);

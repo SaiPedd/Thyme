@@ -410,6 +410,50 @@ describe("blurry lines, no size limit, DM confirmations", () => {
     expect(await say(PHONES[0]!, "2 was 9")).toContain("2. chicken thighs $9.00");
   });
 
+  test("router: a price can be set to $0 ('2 was 0', '2 is free'), and the receipt still saves", async () => {
+    setNow(T0);
+    const { db, say } = await app(async () => TJ);
+    await say(PHONES[0]!, "", true);
+    const zero = await say(PHONES[0]!, "2 was 0");
+    expect(zero).toContain("2. chicken thighs $0.00\n");
+    expect(zero).toContain("the lines add up to $11.11, but the total says $20.10");
+    expect(await say(PHONES[0]!, "2 is $8.99")).toContain("2. chicken thighs $8.99\n");
+    expect(await say(PHONES[0]!, "2 is free")).toContain("2. chicken thighs $0.00\n");
+    expect(await say(PHONES[0]!, "2 was 0.00")).toContain("2. chicken thighs $0.00\n");
+    await say(PHONES[0]!, "2 is mine");
+    expect(await say(PHONES[0]!, "total is $11.11")).not.toContain("Heads up");
+    expect(await say(PHONES[0]!, "yes")).toContain("Saved: $11.11 paid by Alex.");
+    const shares = db.query<{ share_cents: number }, []>("SELECT share_cents FROM expense_shares").all();
+    expect(shares.reduce((s, x) => s + x.share_cents, 0)).toBe(1111);
+  });
+
+  test("router: 'remove 3' takes a misread line off before saving; the rest renumber", async () => {
+    setNow(T0);
+    // The photo double-read the bananas: an extra $1.79 line, so the lines are $1.79 over the total.
+    const { db, say } = await app(async () => ({ ...TJ, items: [...TJ.items.slice(0, 3), { name: "bananas", price: "1.79" }, TJ.items[3]!] }));
+    expect(await say(PHONES[0]!, "", true)).toContain("the lines add up to $21.89, but the total says $20.10");
+    const fixed = await say(PHONES[0]!, "remove 4");
+    expect(fixed).toContain("Removed bananas.");
+    expect(fixed).toContain("4. eggs $4.49");
+    expect(fixed).not.toContain("5.");
+    expect(fixed).not.toContain("Heads up");
+    expect(await say(PHONES[0]!, "remove 9")).toContain("only has items 1 to 4");
+    expect(await say(PHONES[0]!, "delete 1, 2, 3 and 4")).toContain("cancel");
+    expect(await say(PHONES[0]!, "yes")).toContain("Saved: $20.10");
+    expect(db.query<{ n: number }, []>("SELECT COUNT(*) AS n FROM items WHERE cost_source = 'receipt' AND name = 'bananas'").get()!.n).toBe(1);
+  });
+
+  test("removal phrasings", async () => {
+    setNow(T0);
+    const { say } = await app(async () => ({ ...TJ, items: [...TJ.items, { name: "gum", price: "1.00" }, { name: "mints", price: "2.00" }], total: "23.10" }));
+    await say(PHONES[0]!, "", true);
+    expect(await say(PHONES[0]!, "take off 5 and 6")).toContain("Removed gum and mints.");
+    await say(PHONES[0]!, "cancel");
+    await say(PHONES[0]!, "", true);
+    expect(await say(PHONES[0]!, "6 isn't on the receipt")).toContain("Removed mints.");
+    expect(await say(PHONES[0]!, "delete line 5")).toContain("Removed gum.");
+  });
+
   test("router: name and price blurry: asks, '2 was chicken thighs' names it, then it goes in the fridge", async () => {
     setNow(T0);
     const { db, say } = await app(async () => blurAll(1));

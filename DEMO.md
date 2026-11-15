@@ -73,6 +73,7 @@ Say: "Every toss and rescue goes in the waste ledger, so the house sees what it'
 |---|---|
 | Receipt split is wrong after `yes` | As the sender: `undo`. That removes the expense and its fridge items. Send the photo again. |
 | Wrong change before `yes` | Send the right one (`2 is shared`, `Alex paid`), or `cancel` and send the photo again. |
+| A line was misread before `yes` | `remove 3` takes it off; `3 was 4.29` fixes its price; `3 was yogurt` names it. |
 | "I'm having trouble reading receipts right now" | A Gemini hiccup (seen once in rehearsal; the same photo worked a minute later). Send the photo again. |
 | Thyme says "having trouble" | Wait a few seconds and resend. If Gemini is down, the rule-based fallback still handles plain logs, `undo`, and `what do I owe?`. |
 | Reminder doesn't show after time travel | Someone has to message the group first. |
