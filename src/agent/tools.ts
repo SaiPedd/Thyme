@@ -5,12 +5,22 @@
 import type { Database } from "bun:sqlite";
 import { formatCents, parseCents } from "../domain/money";
 import { balancesFor, DuplicateExpenseError, LOGGED_BY, recordExpense, undoLastExpense } from "../domain/expenses";
-import { lastPayment, owedBetween, PaymentError, recordPayment, undoPayment } from "../domain/payments";
+import { lastPayment, owedBetween, PaymentError, recordPayment, undoPayment } from "../domain/settle";
 import { searchShelfLife, type ShelfLifeRow, type Storage } from "../domain/foodkeeper";
 import { claimItem, claimTime, claimWinner } from "../domain/claims";
 import { wasteSummary, type LedgerTotals } from "../domain/ledger";
 import { now } from "../clock";
 import { forgetMember, prefsFor, removePref, savePref, type PrefKind } from "../domain/prefs";
+import {
+  cleanHandle,
+  describePaymentMethods,
+  forgetPaymentMethods,
+  handleIsInMessage,
+  normalizeMethod,
+  paymentMethods,
+  removePaymentMethod,
+  savePaymentMethod,
+} from "../domain/payments";
 import { MEALDB_CREDIT, type MealDbClient } from "../domain/mealdb";
 import { pickMealDbRecipes, pickRecipes, uncheckedDiets, validateRecipe, type MealDbPick, type RecipeCheck } from "../domain/recipes";
 import {
@@ -51,6 +61,8 @@ export interface ToolContext {
   mentionText?: string;
   /** TheMealDB client for recipe ideas; absent or null = built-in recipes only. */
   mealdb?: MealDbClient | null;
+  /** What the sender wrote, so tools can check a value really came from them (e.g. a payment handle). */
+  text?: string;
 }
 
 export type ToolResult = Record<string, unknown>;
@@ -126,7 +138,8 @@ function priceItemsFromLines(ctx: ToolContext, buyerId: number, lines: { descrip
     if (!item) continue;
     setItemPrice(ctx.db, item.id, line.cents, "user");
     candidates = candidates.filter((c) => c.id !== item.id);
-    named.push(item.name);
+    // Never name a personal item in the group.
+    if (!(ctx.isGroup && item.owner_member_id !== null)) named.push(item.name);
   }
   return named;
 }
@@ -373,16 +386,22 @@ const recordPaymentTool: ToolDef = {
 
 const balancesTool: ToolDef = {
   name: "get_balances",
-  description: "The sender's balances with roommates from grocery splits. Use for \"what do I owe?\" or \"who owes me?\". Wasted food never changes balances.",
+  description:
+    "The sender's balances with roommates from grocery splits, with how each person they owe wants to be paid (Zelle, Venmo...). " +
+    "Use for \"what do I owe?\" or \"who owes me?\". Wasted food never changes balances. Repeat payment handles exactly.",
   input_schema: { type: "object", properties: {}, additionalProperties: false },
   run(_input, ctx) {
     const { netCents, lines } = balancesFor(ctx.db, ctx.household.id, ctx.member.id);
+    const payWith = (memberId: number) => {
+      const how = describePaymentMethods(paymentMethods(ctx.db, memberId));
+      return how ? ` (pay with ${how})` : "";
+    };
     const facts = {
       net: netCents === 0 ? "all square" : netCents > 0 ? `you are owed ${formatCents(netCents)}` : `you owe ${formatCents(-netCents)}`,
       breakdown: lines.map((l) =>
         l.netCents > 0
           ? `${nameOf(ctx, l.otherMemberId)} owes you ${formatCents(l.netCents)}`
-          : `you owe ${nameOf(ctx, l.otherMemberId)} ${formatCents(-l.netCents)}`,
+          : `you owe ${nameOf(ctx, l.otherMemberId)} ${formatCents(-l.netCents)}${payWith(l.otherMemberId)}`,
       ),
     };
     if (!ctx.isGroup) return facts;
@@ -515,6 +534,12 @@ const addItemTool: ToolDef = {
   },
 };
 
+/** Fixed wording for a use/toss result (also used for the private DM about a personal item). */
+export function describeStatus(r: { item: string; status: string; rescued?: boolean; wasted_cost?: string }): string {
+  if (r.status === "tossed") return r.wasted_cost ? `Marked the ${r.item} as tossed (${r.wasted_cost} of food wasted).` : `Marked the ${r.item} as tossed.`;
+  return r.rescued ? `Nice save! The ${r.item} was about to expire. Marked as used.` : `Marked the ${r.item} as used.`;
+}
+
 function statusTool(name: "use_item" | "log_toss", status: "used" | "tossed", description: string): ToolDef {
   return {
     name,
@@ -526,24 +551,37 @@ function statusTool(name: "use_item" | "log_toss", status: "used" | "tossed", de
       additionalProperties: false,
     },
     run(input, ctx) {
-      const item = findItem(ctx.db, ctx.household.id, ctx.member.id, String(input.item ?? ""));
+      const phrase = String(input.item ?? "");
+      const item = findItem(ctx.db, ctx.household.id, ctx.member.id, phrase);
       if (!item) return { done: false, note: `nothing called "${input.item}" in the fridge list` };
+      // A personal item named in the group: do it, but confirm by DM and never name it in the group.
+      const privately = ctx.isGroup && item.owner_member_id !== null;
       // "tossed the spinach" ... "no, I threw it out": don't toss a second, different spinach.
-      const again = recentlyChanged(ctx.db, ctx.household.id, status, String(input.item ?? ""), item);
+      const again = recentlyChanged(ctx.db, ctx.household.id, ctx.member.id, status, phrase, item);
       if (again) {
+        if (ctx.isGroup && (again.owner_member_id !== null || privately)) {
+          return { done: false, already_done: true, note: "That was already done a moment ago. Don't name the item in the group." };
+        }
         return { done: false, already: again.name, status, note: `The ${again.name} was already marked ${status} a moment ago. Only call again if they say it's a different one (the ${item.name}).` };
       }
       const rescued = status === "used" && isAtRisk(item) && !isPast(item);
       setItemStatus(ctx.db, item.id, status, ctx.member.id);
-      // The cost is only shown when someone said what they paid, and never for a personal item in the group.
-      const showCost = status === "tossed" && item.cost_cents !== null && (item.owner_member_id === null || !ctx.isGroup);
-      return {
+      const facts = {
         done: true,
         item: item.name,
         status,
         ...(rescued ? { rescued: true, note: "It was about to expire: a rescue." } : {}),
-        ...(showCost ? { wasted_cost: formatCents(item.cost_cents!) } : {}),
+        // The cost is only shown when someone said what they paid.
+        ...(status === "tossed" && item.cost_cents !== null ? { wasted_cost: formatCents(item.cost_cents) } : {}),
       };
+      if (!privately) return facts;
+      ctx.drafts.push({
+        audience: { kind: "member", memberId: ctx.member.id },
+        sensitivity: "personal",
+        subjectMemberId: ctx.member.id,
+        text: describeStatus(facts),
+      });
+      return { done: true, personal_logged_privately: true, note: "It was one of their own items: confirmed by DM. Don't name it or its cost in the group." };
     },
   };
 }
@@ -889,7 +927,63 @@ const forgetMeTool: ToolDef = {
   input_schema: { type: "object", properties: {}, additionalProperties: false },
   run(_input, ctx) {
     const r = forgetMember(ctx.db, ctx.member.id, ctx.isGroup ? undefined : ctx.chatId);
-    return { forgotten: true, preferences_deleted: r.prefs, messages_deleted: r.turns, kept: "expenses and balances" };
+    forgetPaymentMethods(ctx.db, ctx.member.id);
+    return { forgotten: true, preferences_deleted: r.prefs, messages_deleted: r.turns, payment_info_deleted: true, kept: "expenses and balances" };
+  },
+};
+
+const PAY_APPS = ["Zelle", "Venmo", "Cash App", "PayPal", "Apple Cash"];
+
+/** Confirm by DM when in the group (the handle is never repeated there); directly in a DM. */
+function paymentReply(ctx: ToolContext, facts: ToolResult, dmText: string): ToolResult {
+  if (!ctx.isGroup) return facts;
+  ctx.drafts.push({ audience: { kind: "member", memberId: ctx.member.id }, sensitivity: "personal", subjectMemberId: ctx.member.id, text: dmText });
+  return { ...(facts.error ? { error: facts.error } : { done: true }), sent_privately: true, note: "Confirmed by DM. Don't repeat the handle in the group." };
+}
+
+const savePaymentTool: ToolDef = {
+  name: "save_payment_method",
+  description:
+    `Save how the sender wants roommates to pay them back, e.g. "pay me through Zelle at dharaniDevadiga" or "my Venmo is @dharani". ` +
+    `Apps: ${PAY_APPS.join(", ")}. Pass the handle exactly as they wrote it; never guess or fix one. ` +
+    "Several apps can be saved. With remove: true, delete that app. It's shown next to what roommates owe them, only in DMs.",
+  input_schema: {
+    type: "object",
+    properties: {
+      method: { type: "string", enum: PAY_APPS },
+      handle: { type: "string", description: "Exactly as written, e.g. \"dharaniDevadiga\", \"@dharani\", an email or phone" },
+      remove: { type: "boolean" },
+    },
+    required: ["method"],
+    additionalProperties: false,
+  },
+  run(input, ctx) {
+    const method = normalizeMethod(String(input.method ?? ""));
+    if (!method) return { saved: false, error: `unknown app. Supported: ${PAY_APPS.join(", ")}` };
+    if (input.remove === true) {
+      const removed = removePaymentMethod(ctx.db, ctx.member.id, method);
+      return paymentReply(ctx, { removed, method }, removed ? `Removed your ${method} payment info.` : `You didn't have ${method} saved.`);
+    }
+    const handle = cleanHandle(String(input.handle ?? ""));
+    if (!handle) return { saved: false, error: "Ask for their handle (username, email, or phone), with no spaces." };
+    // The handle must be what they actually typed, so a model slip can't send money to the wrong account.
+    if (ctx.text !== undefined && !handleIsInMessage(handle, ctx.text)) {
+      return { saved: false, error: "That handle isn't in their message. Ask them to type it exactly." };
+    }
+    const all = savePaymentMethod(ctx.db, ctx.member.id, method, handle);
+    const dm = `Saved: roommates who owe you will see ${method}: ${handle}.` + (all.length > 1 ? `\nAll your payment info: ${describePaymentMethods(all)}.` : "");
+    return paymentReply(ctx, { saved: true, method, handle, all: describePaymentMethods(all) }, dm);
+  },
+};
+
+const getPaymentTool: ToolDef = {
+  name: "get_payment_methods",
+  description: "The sender's own saved payment info (\"how do people pay me?\", \"my payment info\"). In the group it's sent by DM.",
+  input_schema: { type: "object", properties: {}, additionalProperties: false },
+  run(_input, ctx) {
+    const how = describePaymentMethods(paymentMethods(ctx.db, ctx.member.id));
+    const text = how ? `Roommates who owe you see: ${how}.` : `You haven't saved any payment info. Try "pay me through Zelle at <your handle>".`;
+    return paymentReply(ctx, how ? { payment_methods: how } : { payment_methods: null, note: "None saved yet." }, text);
   },
 };
 
@@ -940,6 +1034,8 @@ export const TOOLS: ToolDef[] = [
   savePrefTool,
   getPrefsTool,
   forgetMeTool,
+  savePaymentTool,
+  getPaymentTool,
   checkItemTool,
   summaryTool,
 ];

@@ -17,7 +17,7 @@ Full build plan: [PLAN.md](PLAN.md).
 | 3 | Inventory and expiry tracking, reminders, claims on expiring food | Done |
 | 4 | Kitchen companion: recipes from what's in the fridge (built-in + TheMealDB), saved preferences | Done |
 | 5 | Waste ledger: tosses and rescues, tracked (never charged to balances) | Done |
-| 6 | Receipt photos (stretch) | Built, needs a phone test |
+| 6 | Receipt photos (stretch), settling up | Done |
 | 7 | Demo polish, eval script | Planned |
 
 ## What works today
@@ -51,8 +51,14 @@ Thyme:  Cooked rice lasts 4-6 days in the fridge according to the USDA FoodKeepe
 - **Receipt photos:** send a photo of a grocery receipt. Thyme reads the items, tax, and total, checks that
   they add up, and shows the list. Reply "Sam paid" if someone else bought it, "2 is mine", "3 and 4 are
   Jordan's", or "5 is me and Sam's" for items that aren't for everyone, "split with Sam only" or "split between
-  me and Jordan" if not the whole house is in on it, then "yes". Whoever sent the receipt can "undo" it. It splits the bill (each kept item carries its share of tax)
+  me and Jordan" if not the whole house is in on it, then "yes". Fix a misread line before saving: "3 was 6.49"
+  (price), "3 was yogurt" (a name it couldn't read), "remove 3", or "total is $X". A blurry price is worked out
+  from the total, and a coupon comes off the item it's for. It splits the bill (each kept item carries its share of tax)
   and adds the food to the fridge list with the real prices. Nothing is saved before "yes", and the photo is never stored.
+  Whoever sent the receipt can "undo" it, which also takes its food back off the fridge list.
+- **Settling up:** "I paid Alex back $12", "Sam venmo'd me", or "Alex and I are square" records a payback, so
+  balances can go back to $0. With no amount, code settles exactly what's owed; paying more than is owed is
+  refused. Amounts only go to the two people's DMs, and "undo" removes it.
 - **Roommates and names:** whoever is in the household group becomes a roommate. Thyme asks each person
   their name once and welcomes anyone added later.
 - **Getting its attention:** say "Thyme" (or an alias from `BOT_ALIASES`) anywhere in a message. In the group
@@ -62,6 +68,10 @@ Thyme:  Cooked rice lasts 4-6 days in the fridge according to the USDA FoodKeepe
   9 AM about shared food expiring within 48 hours (personal food goes to the owner's DM), and "mine" claims it.
 - **Kitchen companion:** "what can I make?" suggests a recipe that only uses what's in the fridge, favoring food
   about to expire and honoring saved diets, dislikes, and allergies.
+- **How to pay back:** "pay me through Zelle at dharaniDevadiga" or "my Venmo is @dharani" saves how you want
+  to be paid (Zelle, Venmo, Cash App, PayPal, Apple Cash; several allowed). "What do I owe?" then shows it next
+  to each amount: "you owe Dharani $13.20 (pay with Zelle: dharaniDevadiga)". Handles are saved exactly as typed,
+  only shown in DMs, and removed with "remove my Venmo" or "forget me".
 - **Prices:** an item's price is only what a roommate said they paid ("got spinach for $4", or an expense
   line like "chicken thighs ($9) are just mine"). No price given means unknown, never estimated.
 - **Waste ledger:** "tossed the spinach" is logged as wasted; eating food within 48h of its date is a rescue.
@@ -145,7 +155,8 @@ index.ts                 entry point (Claw or terminal adapter)
 src/adapters/            claw.ts (WebSocket), terminal.ts (dev), types.ts (one interface for both)
 src/agent/               loop.ts (Gemini function calling), tools.ts, prompt.ts, fallback.ts, triggers.ts
 src/domain/              money, splits, expenses, household, foodkeeper, phone, inventory, claims,
-                         recipes, prefs, prices, waste (ledger), impact (pounds and CO2)
+                         recipes, prefs, prices, waste (ledger), impact (pounds and CO2),
+                         payments (how to pay back), settle (paybacks)
 src/privacy/projection.ts  who can see what
 src/inbox.ts             dedupe, debounce, per-chat ordering
 src/outbox.ts            caps, budget, retries, delivery tracking

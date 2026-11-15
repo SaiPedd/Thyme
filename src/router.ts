@@ -248,6 +248,7 @@ export function makeRouter(deps: RouterDeps) {
     const ctx: ToolContext = {
       db, household, members, member, isGroup: m.isGroup, messageId: m.messageId, chatId: m.chatId, sentAt: m.sentAt, drafts,
       mealdb: deps.mealdb ?? null,
+      text: m.text,
     };
     const history = loadHistory(db, m.chatId);
     saveTurn(db, m.chatId, member, "user", shown, at);

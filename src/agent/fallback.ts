@@ -5,7 +5,7 @@
 // "Alex and I are square").
 // Uses the same tools as the agent, so facts come from code either way.
 
-import { runToolAsync, type ToolContext } from "./tools";
+import { describeStatus, runToolAsync, type ToolContext } from "./tools";
 import { agree, isPlural } from "../domain/inventory";
 
 export type Intent =
@@ -13,6 +13,9 @@ export type Intent =
   | { kind: "undo" }
   | { kind: "payment"; other: string; direction: "i_paid_them" | "they_paid_me" | "square"; amount?: string }
   | { kind: "balances" }
+  | { kind: "pay_save"; method: string; handle: string }
+  | { kind: "pay_remove"; method: string }
+  | { kind: "pay_show" }
   | { kind: "add"; items: { name: string; price?: string }[] }
   | { kind: "use"; item: string }
   | { kind: "toss"; item: string }
@@ -94,6 +97,15 @@ export function parseIntent(raw: string, botName = "", memberNames?: string[]): 
   // Before expenses: "I paid Alex back $12" mentions money and "paid" but isn't a new expense.
   const payment = parsePayment(text, memberNames);
   if (payment) return payment;
+
+  // Payment info. Handles keep the case the person typed (Zelle usernames, emails).
+  const APP = "(zelle|venmo|cash ?app|paypal|apple (?:cash|pay))";
+  let pay = text.match(new RegExp(`^(?:you can |u can |please )?pay me (?:back )?(?:through|via|on|with|by|using|over|thru)\\s+${APP}\\s*(?:at|to|:|@|-)?\\s*(\\S+)`, "i"));
+  if (!pay) pay = text.match(new RegExp(`^my ${APP}(?:\\s+(?:is|handle is|username is|id is|account is))?\\s*:?\\s*(\\S+)`, "i"));
+  if (pay) return { kind: "pay_save", method: pay[1]!, handle: pay[2]! };
+  const payRemove = t.match(new RegExp(`^(?:remove|delete|forget|clear) my ${APP}\\b`));
+  if (payRemove) return { kind: "pay_remove", method: payRemove[1]! };
+  if (/\b(my (payment|pay) (info|methods?|details)|how (do|can|should) (people|roommates|they|you guys) pay me)\b/.test(t)) return { kind: "pay_show" };
 
   const money = text.match(/\$\s?\d[\d,]*(?:\.\d{1,2})?/);
   if (money && /\b(groceries|grocery|spent|paid|bill|split|costco|trader joe'?s|target)\b/i.test(text)) {
@@ -201,13 +213,12 @@ export function describeToolResult(name: string, r: Record<string, any>): string
       return lines.join("\n") || "I didn't catch which food that was.";
     }
     case "use_item":
-      if (r.already) return `The ${r.already} is already marked as used.`;
-      if (!r.done) return `I don't see that in the fridge list.`;
-      return r.rescued ? `Nice save! The ${r.item} was about to expire. Marked as used.` : `Marked the ${r.item} as used.`;
     case "log_toss":
-      if (r.already) return `The ${r.already} is already marked as tossed.`;
+      if (r.personal_logged_privately) return "Done, I DM'd you the details.";
+      if (r.already_done) return "That's already done.";
+      if (r.already) return `The ${r.already} is already marked as ${name === "use_item" ? "used" : "tossed"}.`;
       if (!r.done) return `I don't see that in the fridge list.`;
-      return r.wasted_cost ? `Marked the ${r.item} as tossed (${r.wasted_cost} of food wasted).` : `Marked the ${r.item} as tossed.`;
+      return describeStatus(r as Parameters<typeof describeStatus>[0]);
     case "get_waste_summary": {
       type T = { items: number; known_cost: string; items_with_no_price?: number };
       const part = (label: string, t: T) =>
@@ -302,8 +313,16 @@ export function describeToolResult(name: string, r: Record<string, any>): string
     case "get_preferences":
       if (r.sent_privately) return "I DM'd you what I have saved.";
       return (r.preferences as string[]).length ? ["Here's what I have saved for you:", ...(r.preferences as string[])].join("\n") : "You haven't saved any food preferences yet.";
+    case "save_payment_method":
+      if (r.sent_privately) return r.error ? `I couldn't save that: ${r.error}` : "Saved. I DM'd you the details.";
+      if (r.error) return `I couldn't save that: ${r.error}`;
+      if (r.removed !== undefined) return r.removed ? `Removed your ${r.method} payment info.` : `You didn't have ${r.method} saved.`;
+      return `Saved: roommates who owe you will see ${r.method}: ${r.handle}.${String(r.all).includes(",") ? `\nAll your payment info: ${r.all}.` : ""}`;
+    case "get_payment_methods":
+      if (r.sent_privately) return "I DM'd you your payment info.";
+      return r.payment_methods ? `Roommates who owe you see: ${r.payment_methods}.` : `You haven't saved any payment info. Try "pay me through Zelle at <your handle>".`;
     case "forget_me":
-      return `Done. I deleted your saved preferences and our chat history. Expenses and balances stay so everyone's totals are right.`;
+      return `Done. I deleted your saved preferences, payment info, and our chat history. Expenses and balances stay so everyone's totals are right.`;
     case "check_item":
       if (r.item) return `The ${r.item}: ${r.status}. ${r.advice}`;
       return describeToolResult("shelf_life_lookup", r);
@@ -364,6 +383,12 @@ export async function runFallback(text: string, ctx: ToolContext, botName = ""):
       return describeToolResult("get_preferences", await runToolAsync("get_preferences", {}, ctx));
     case "forget":
       return describeToolResult("forget_me", await runToolAsync("forget_me", {}, ctx));
+    case "pay_save":
+      return describeToolResult("save_payment_method", await runToolAsync("save_payment_method", { method: intent.method, handle: intent.handle }, ctx));
+    case "pay_remove":
+      return describeToolResult("save_payment_method", await runToolAsync("save_payment_method", { method: intent.method, remove: true }, ctx));
+    case "pay_show":
+      return describeToolResult("get_payment_methods", await runToolAsync("get_payment_methods", {}, ctx));
     case "check":
       return describeToolResult("check_item", await runToolAsync("check_item", { item: intent.item }, ctx));
   }

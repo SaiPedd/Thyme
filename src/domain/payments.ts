@@ -1,82 +1,76 @@
-// Settling up: "I paid Alex back $12", "Sam paid me back", "Alex and I are square".
-// A payment is a balance entry in the opposite direction of the debt (the payee now "owes" the payer
-// the amount), so it nets against expenses in balance_entries. Code decides every amount: with no
-// amount given, it is exactly what is owed right now. Paying more than is owed is refused.
+// How each roommate wants to be paid back ("pay me through Zelle at dharaniDevadiga", "my Venmo is @dharani").
+// Shown next to what someone owes them, which only ever goes to a DM. Stored in the state table
+// (key "pay:<memberId>"), so no migration is needed. Handles are saved exactly as the person typed them;
+// the model never makes one up (see handleIsInMessage).
 
 import type { Database } from "bun:sqlite";
-import { now } from "../clock";
-import { balancesFor } from "./expenses";
 
-export class PaymentError extends Error {}
-
-/** What `fromId` owes `toId` right now, in cents (0 if nothing, or if it's the other way round). */
-export function owedBetween(db: Database, householdId: number, fromId: number, toId: number): number {
-  const line = balancesFor(db, householdId, fromId).lines.find((l) => l.otherMemberId === toId);
-  return line && line.netCents < 0 ? -line.netCents : 0;
+export interface PaymentMethod {
+  /** Display label, e.g. "Zelle". */
+  method: string;
+  handle: string;
 }
 
-export interface RecordedPayment {
-  id: number;
-  fromId: number;
-  toId: number;
-  amountCents: number;
-  /** What `fromId` still owes `toId` afterwards (0 = square). */
-  stillOwedCents: number;
+/** Known apps: lowercase spelling (spaces removed) -> display label. */
+const METHODS: Record<string, string> = {
+  zelle: "Zelle",
+  venmo: "Venmo",
+  cashapp: "Cash App",
+  paypal: "PayPal",
+  applecash: "Apple Cash",
+  applepay: "Apple Cash",
+};
+
+/** "cash app", "CashApp", "venmo" -> "Cash App", "Venmo". Null if it isn't a payment app we know. */
+export function normalizeMethod(raw: string): string | null {
+  return METHODS[raw.toLowerCase().replace(/[^a-z]/g, "")] ?? null;
 }
 
-export function recordPayment(
-  db: Database,
-  input: {
-    householdId: number;
-    fromId: number;
-    toId: number;
-    /** null = pay off exactly what is owed. */
-    amountCents: number | null;
-    loggedById: number;
-    sourceMessageId?: string;
-  },
-): RecordedPayment {
-  const { householdId, fromId, toId } = input;
-  if (fromId === toId) throw new PaymentError("someone can't pay themselves");
-  const owed = owedBetween(db, householdId, fromId, toId);
-  if (owed === 0) throw new PaymentError("nothing is owed");
-  const amount = input.amountCents ?? owed;
-  if (!Number.isInteger(amount) || amount <= 0) throw new PaymentError("the amount must be positive");
-  if (amount > owed) throw new PaymentError(`more than is owed (${owed} cents)`);
-
-  const at = now().toISOString();
-  const id = db.transaction(() => {
-    const row = db
-      .query<{ id: number }, [number, number, number, number, number, string | null, string]>(
-        `INSERT INTO payments (household_id, from_member_id, to_member_id, amount_cents, logged_by_member_id, source_message_id, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?) RETURNING id`,
-      )
-      .get(householdId, fromId, toId, amount, input.loggedById, input.sourceMessageId ?? null, at)!;
-    // The payee now "owes" the payer this much, which cancels the debt.
-    db.run(
-      `INSERT INTO balance_entries (household_id, debtor_member_id, creditor_member_id, amount_cents, source, source_id, created_at)
-       VALUES (?, ?, ?, ?, 'payment', ?, ?)`,
-      [householdId, toId, fromId, amount, row.id, at],
-    );
-    return row.id;
-  })();
-  return { id, fromId, toId, amountCents: amount, stillOwedCents: owed - amount };
+/** Trim quotes and trailing punctuation; null if empty, too long, or has spaces. */
+export function cleanHandle(raw: string): string | null {
+  const h = raw.trim().replace(/^["'`]+|["'`]+$/g, "").replace(/[.,!?;:]+$/, "");
+  return h && h.length <= 60 && !/\s/.test(h) ? h : null;
 }
 
-/** The member's most recent active payment they logged, with its time, or null. */
-export function lastPayment(db: Database, householdId: number, memberId: number) {
-  return db
-    .query<{ id: number; from_member_id: number; to_member_id: number; amount_cents: number; created_at: string }, [number, number]>(
-      `SELECT id, from_member_id, to_member_id, amount_cents, created_at FROM payments
-        WHERE household_id = ? AND logged_by_member_id = ? AND undone_at IS NULL ORDER BY id DESC LIMIT 1`,
-    )
-    .get(householdId, memberId);
+/** True if the handle appears in what the person actually wrote (ignoring a leading @ or $ and case). */
+export function handleIsInMessage(handle: string, message: string): boolean {
+  const bare = (s: string) => s.toLowerCase().replace(/^[@$]/, "");
+  return message.toLowerCase().includes(bare(handle));
 }
 
-export function undoPayment(db: Database, paymentId: number): void {
-  const at = now().toISOString();
-  db.transaction(() => {
-    db.run("UPDATE payments SET undone_at = ? WHERE id = ?", [at, paymentId]);
-    db.run("UPDATE balance_entries SET undone_at = ? WHERE source = 'payment' AND source_id = ?", [at, paymentId]);
-  })();
+const key = (memberId: number) => `pay:${memberId}`;
+
+export function paymentMethods(db: Database, memberId: number): PaymentMethod[] {
+  const row = db.query<{ value: string }, [string]>("SELECT value FROM state WHERE key = ?").get(key(memberId));
+  return row ? (JSON.parse(row.value) as PaymentMethod[]) : [];
+}
+
+function store(db: Database, memberId: number, methods: PaymentMethod[]): void {
+  if (methods.length === 0) db.run("DELETE FROM state WHERE key = ?", [key(memberId)]);
+  else db.run("INSERT INTO state (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value", [key(memberId), JSON.stringify(methods)]);
+}
+
+/** Save (or replace) one app's handle. Several apps per person are kept. */
+export function savePaymentMethod(db: Database, memberId: number, method: string, handle: string): PaymentMethod[] {
+  const methods = paymentMethods(db, memberId).filter((m) => m.method !== method);
+  methods.push({ method, handle });
+  store(db, memberId, methods);
+  return methods;
+}
+
+export function removePaymentMethod(db: Database, memberId: number, method: string): boolean {
+  const before = paymentMethods(db, memberId);
+  const after = before.filter((m) => m.method !== method);
+  store(db, memberId, after);
+  return after.length < before.length;
+}
+
+/** "Zelle: dharaniDevadiga, Venmo: @dharani", or "" if none saved. */
+export function describePaymentMethods(methods: PaymentMethod[]): string {
+  return methods.map((m) => `${m.method}: ${m.handle}`).join(", ");
+}
+
+/** Delete one member's payment info ("forget me"). */
+export function forgetPaymentMethods(db: Database, memberId: number): void {
+  store(db, memberId, []);
 }

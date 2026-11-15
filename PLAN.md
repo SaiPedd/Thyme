@@ -166,6 +166,7 @@ split in a grocery bill, so charging again for a toss would double-charge. CO2 a
 (no real per-item data); they can return later with a cited dataset.
 - setItemStatus writes the ledger: tossed = wasted; an at-risk item (within 48h, not past its date) eaten = rescued.
 - Cost is only what someone said they paid; `ledger.priced = 0` marks items with no price (never estimated).
+  Migration 5 (migration 4 is the TheMealDB cache).
 - get_waste_summary: this week and all time. The group sees household totals only (no items, no names);
   a DM adds the sender's own personal items.
 - Done when: tosses and rescues are logged, balances are unchanged, and the group only sees totals.

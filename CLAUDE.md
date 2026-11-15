@@ -39,6 +39,8 @@ Channel: Claw Messenger (https://www.clawmessenger.com/docs) behind one adapter 
   `expires_at` uses the conservative low end. Ask raw or cooked when ambiguous.
 - Money is integer cents. Split shares always sum exactly to the total; leftover cents go to the buyer.
 - Item prices come only from what a roommate said they paid (or a receipt). Never estimate a price; unknown stays NULL.
+- Payment handles ("pay me through Zelle at X") are saved exactly as the person typed them (code checks the handle is in
+  their message), shown only in DMs next to what someone owes them, and deleted by "forget me".
 - Recipe suggestions are checked in code against the inventory. Pantry staples (salt, pepper, garlic, oils, dried
   spices and herbs, onions, stock, flour, sugar...) are assumed; perishables must be in the inventory.
   Built-in recipes need every non-staple ingredient. TheMealDB recipes need half or more of their main ingredients,

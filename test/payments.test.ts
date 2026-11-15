@@ -1,143 +1,132 @@
-// Settling up: "I paid Alex back $12", "Sam paid me back", "Alex and I are square".
-// Balances go back to exactly $0, never past it; undo works; amounts stay out of the group.
-
-import { afterEach, describe, expect, test } from "bun:test";
-import { Database } from "bun:sqlite";
-import { parseIntent, parsePayment, runFallback } from "../src/agent/fallback";
+import { describe, expect, test } from "bun:test";
+import type { Database } from "bun:sqlite";
+import { describeToolResult, parseIntent, runFallback } from "../src/agent/fallback";
 import { runTool, type ToolContext } from "../src/agent/tools";
-import { addDays, resetClock, setNow } from "../src/clock";
-import { migrate } from "../src/db";
-import { MIGRATIONS } from "../src/db/schema";
-import { balancesFor, recordExpense } from "../src/domain/expenses";
 import { getHousehold, getMembers } from "../src/domain/household";
-import { owedBetween, PaymentError, recordPayment } from "../src/domain/payments";
+import { paymentMethods } from "../src/domain/payments";
 import { setupHousehold } from "./helpers";
 
-const T0 = new Date("2026-11-14T15:00:00Z");
-afterEach(() => resetClock());
+// Alex = 0, Sam = 1, Jordan = 2.
+function ctxFor(db: Database, memberIndex: number, isGroup: boolean, text?: string): ToolContext {
+  const members = getMembers(db, 1);
+  return { db, household: getHousehold(db)!, members, member: members[memberIndex]!, isGroup, messageId: crypto.randomUUID(), drafts: [], text };
+}
 
-// Alex (1) paid $30 for groceries split 3 ways: Sam (2) and Jordan (3) each owe Alex $10.
-function withExpense() {
-  setNow(T0);
+/** Alex paid $30, so Sam and Jordan each owe Alex $10. */
+function withDebt() {
   const db = setupHousehold();
-  recordExpense(db, { householdId: 1, tz: "America/New_York", spec: { totalCents: 3000, buyerId: 1, memberIds: [1, 2, 3] } });
-  setNow(addDays(T0, 0.01));
+  runTool("record_expense", { total: "$30" }, ctxFor(db, 0, true));
   return db;
 }
 
-function ctxFor(db: Database, memberId: number, isGroup = false): ToolContext {
-  const members = getMembers(db, 1);
-  return { db, household: getHousehold(db)!, members, member: members.find((m) => m.id === memberId)!, isGroup, messageId: crypto.randomUUID(), drafts: [] };
-}
+const say = (db: Database, who: number, isGroup: boolean, text: string) => {
+  const ctx = ctxFor(db, who, isGroup, text);
+  return runFallback(text, ctx).then((reply) => ({ reply, ctx }));
+};
 
-describe("payments in the balance table", () => {
-  test("paying back exactly what's owed zeroes the balance", () => {
-    const db = withExpense();
-    expect(owedBetween(db, 1, 2, 1)).toBe(1000);
-    const p = recordPayment(db, { householdId: 1, fromId: 2, toId: 1, amountCents: null, loggedById: 2 });
-    expect(p).toMatchObject({ amountCents: 1000, stillOwedCents: 0 });
-    expect(balancesFor(db, 1, 2).netCents).toBe(0);
-    expect(balancesFor(db, 1, 1).netCents).toBe(1000); // Jordan still owes Alex
+describe("parsing payment info", () => {
+  test("keeps the handle exactly as typed", () => {
+    expect(parseIntent("Pay me through Zelle at dharaniDevadiga")).toEqual({ kind: "pay_save", method: "Zelle", handle: "dharaniDevadiga" });
+    expect(parseIntent("my venmo is @dharani")).toEqual({ kind: "pay_save", method: "venmo", handle: "@dharani" });
+    expect(parseIntent("you can pay me via cash app $dharani")).toEqual({ kind: "pay_save", method: "cash app", handle: "$dharani" });
+    expect(parseIntent("pay me back on paypal: dharani@example.com")).toEqual({ kind: "pay_save", method: "paypal", handle: "dharani@example.com" });
+    expect(parseIntent("remove my venmo")).toEqual({ kind: "pay_remove", method: "venmo" });
+    expect(parseIntent("what's my payment info?")).toEqual({ kind: "pay_show" });
   });
 
-  test("partial payments add up; overpaying or paying with nothing owed is refused", () => {
-    const db = withExpense();
-    recordPayment(db, { householdId: 1, fromId: 2, toId: 1, amountCents: 400, loggedById: 2 });
-    expect(owedBetween(db, 1, 2, 1)).toBe(600);
-    expect(() => recordPayment(db, { householdId: 1, fromId: 2, toId: 1, amountCents: 601, loggedById: 2 })).toThrow(PaymentError);
-    recordPayment(db, { householdId: 1, fromId: 2, toId: 1, amountCents: 600, loggedById: 1 });
-    expect(balancesFor(db, 1, 2).netCents).toBe(0);
-    expect(() => recordPayment(db, { householdId: 1, fromId: 2, toId: 1, amountCents: null, loggedById: 2 })).toThrow("nothing is owed");
-    // Alex doesn't owe Sam anything either way.
-    expect(() => recordPayment(db, { householdId: 1, fromId: 1, toId: 2, amountCents: 100, loggedById: 1 })).toThrow(PaymentError);
-  });
-
-  test("migration 8 keeps existing balances and allows payments", () => {
-    const db = new Database(":memory:", { strict: true });
-    for (const sql of MIGRATIONS.slice(0, 7)) db.exec(sql);
-    db.exec("PRAGMA user_version = 7");
-    db.run("INSERT INTO households (id, name, tz, mode, created_at) VALUES (1, 'h', 'America/New_York', 'group', 't')");
-    db.run("INSERT INTO members (id, household_id, phone, name, created_at) VALUES (1, 1, '+16095550101', 'A', 't'), (2, 1, '+16095550102', 'B', 't')");
-    db.run("INSERT INTO balance_entries (household_id, debtor_member_id, creditor_member_id, amount_cents, source, source_id, created_at) VALUES (1, 2, 1, 500, 'expense', 1, 't')");
-    expect(migrate(db)).toBe(MIGRATIONS.length - 7);
-    expect(owedBetween(db, 1, 2, 1)).toBe(500);
-    recordPayment(db, { householdId: 1, fromId: 2, toId: 1, amountCents: null, loggedById: 2 });
-    expect(balancesFor(db, 1, 1).netCents).toBe(0);
+  test("doesn't swallow other messages", () => {
+    expect(parseIntent("I paid $30 for groceries")?.kind).toBe("expense");
+    expect(parseIntent("what do I owe?")).toEqual({ kind: "balances" });
   });
 });
 
-describe("understanding paybacks (rule-based)", () => {
-  const names = ["Alex", "Sam", "Jordan"];
-  test("phrasings", () => {
-    expect(parsePayment("I paid Alex back $12", names)).toEqual({ kind: "payment", other: "alex", direction: "i_paid_them", amount: "12" });
-    expect(parsePayment("venmo'd sam 20.50", names)).toEqual({ kind: "payment", other: "sam", direction: "i_paid_them", amount: "20.50" });
-    expect(parsePayment("I paid Alex back", names)).toEqual({ kind: "payment", other: "alex", direction: "i_paid_them", amount: undefined });
-    expect(parsePayment("Sam paid me back!", names)).toEqual({ kind: "payment", other: "sam", direction: "they_paid_me", amount: undefined });
-    expect(parsePayment("jordan sent me $5", names)).toEqual({ kind: "payment", other: "jordan", direction: "they_paid_me", amount: "5" });
-    for (const t of ["Alex and I are square", "me and alex are even", "we're settled up with Alex", "settle up with alex"]) {
-      expect(parsePayment(t, names)).toMatchObject({ other: "alex", direction: "square" });
-    }
+describe("what do I owe shows how to pay", () => {
+  test("the person you owe's handle is next to the amount", async () => {
+    const db = withDebt();
+    await say(db, 0, false, "pay me through Zelle at dharaniDevadiga");
+    const { reply } = await say(db, 1, false, "what do I owe?");
+    expect(reply).toContain("you owe Alex $10.00 (pay with Zelle: dharaniDevadiga)");
+    // The person who is owed doesn't see handles.
+    const alex = await say(db, 0, false, "what do I owe?");
+    expect(alex.reply).toContain("Sam owes you $10.00");
+    expect(alex.reply).not.toContain("Zelle");
   });
 
-  test("not paybacks: expenses and other uses of 'paid'/'sent' stay what they were", () => {
-    expect(parseIntent("I paid $48 for groceries", "", names)?.kind).toBe("expense");
-    expect(parseIntent("paid for groceries $30 split 3 ways", "", names)?.kind).toBe("expense");
-    expect(parseIntent("I paid rent $500", "", names)?.kind).not.toBe("payment");
-    expect(parsePayment("I sent Sam the link", names)).toBeNull();
-    expect(parsePayment("I paid Taylor back $5", names)).toBeNull(); // not a roommate
+  test("several apps are all shown; saving the same app again replaces it", async () => {
+    const db = withDebt();
+    await say(db, 0, false, "pay me through Zelle at oldHandle");
+    await say(db, 0, false, "pay me through Zelle at dharaniDevadiga");
+    const venmo = await say(db, 0, false, "my Venmo is @dharani");
+    expect(venmo.reply).toContain("All your payment info: Zelle: dharaniDevadiga, Venmo: @dharani.");
+    const { reply } = await say(db, 2, false, "what do I owe");
+    expect(reply).toContain("(pay with Zelle: dharaniDevadiga, Venmo: @dharani)");
+    expect(reply).not.toContain("oldHandle");
+  });
+
+  test("no saved info: just the amount", async () => {
+    const db = withDebt();
+    const { reply } = await say(db, 1, false, "what do I owe?");
+    expect(reply).toContain("you owe Alex $10.00");
+    expect(reply).not.toContain("pay with");
   });
 });
 
-describe("record_payment tool and undo", () => {
-  test("in a DM: Sam says he paid Alex back; Sam sees the result, Alex gets a DM", async () => {
-    const db = withExpense();
-    const ctx = ctxFor(db, 2);
-    const reply = await runFallback("I paid Alex back", ctx);
-    expect(reply).toContain("Recorded: Sam paid Alex $10.00. Sam and Alex are now square.");
-    expect(ctx.drafts.map((d) => d.audience)).toEqual([{ kind: "member", memberId: 1 }]);
-    expect(ctx.drafts[0]!.text).toContain("logged by Sam");
+describe("privacy", () => {
+  test("set in the group: saved, confirmed by DM, the handle isn't repeated in the group", async () => {
+    const db = withDebt();
+    const { reply, ctx } = await say(db, 0, true, "pay me through Zelle at dharaniDevadiga");
+    expect(reply).toBe("Saved. I DM'd you the details.");
+    expect(ctx.drafts).toHaveLength(1);
+    expect(ctx.drafts[0]).toMatchObject({ audience: { kind: "member", memberId: 1 }, sensitivity: "personal" });
+    expect(ctx.drafts[0]!.text).toContain("Zelle: dharaniDevadiga");
+    expect(paymentMethods(db, 1)).toEqual([{ method: "Zelle", handle: "dharaniDevadiga" }]);
   });
 
-  test("'Alex and I are square' works out who paid; 'undo' removes the payment, not the expense", async () => {
-    const db = withExpense();
-    const ctx = ctxFor(db, 1);
-    expect(await runFallback("Jordan and I are square", ctx)).toContain("Jordan paid Alex $10.00");
-    expect(balancesFor(db, 1, 3).netCents).toBe(0);
-    setNow(addDays(T0, 0.02));
-    expect(await runFallback("undo", ctxFor(db, 1))).toContain("Undone: the $10.00 payment from Jordan to Alex is removed");
-    expect(owedBetween(db, 1, 3, 1)).toBe(1000);
-    // Next undo is the expense itself.
-    expect(await runFallback("undo", ctxFor(db, 1))).toContain("$30.00 expense is removed");
+  test("balances asked in the group go to the DM, handles included there only", async () => {
+    const db = withDebt();
+    await say(db, 0, false, "pay me through Zelle at dharaniDevadiga");
+    const { reply, ctx } = await say(db, 1, true, "what do I owe?");
+    expect(reply).not.toContain("dharani");
+    expect(ctx.drafts[0]!.text).toContain("(pay with Zelle: dharaniDevadiga)");
   });
 
-  test("too much, nothing owed, already square: clear answers, nothing saved", async () => {
-    const db = withExpense();
-    expect(await runFallback("I paid Alex back $15", ctxFor(db, 2))).toContain("Sam only owes Alex $10.00. Did you mean that?");
-    expect(await runFallback("Sam paid me back", ctxFor(db, 3))).toContain("Sam doesn't owe Jordan anything");
-    expect(await runFallback("Sam and I are square", ctxFor(db, 3))).toContain("already square");
-    expect(db.query("SELECT COUNT(*) AS n FROM payments").get()).toEqual({ n: 0 });
+  test("the model can't save a handle the person didn't type", () => {
+    const db = setupHousehold();
+    const r = runTool("save_payment_method", { method: "Zelle", handle: "dharaniDevadigaa" }, ctxFor(db, 0, false, "pay me on zelle at dharaniDevadiga"));
+    expect(r).toMatchObject({ saved: false });
+    expect(paymentMethods(db, 1)).toEqual([]);
   });
 
-  test("in the group: no amounts in the group reply, both people get a DM", async () => {
-    const db = withExpense();
-    const ctx = ctxFor(db, 2, true);
-    const reply = await runFallback("paid Alex back $10", ctx);
-    expect(reply).toBe("Got it, recorded. I DM'd you both the details.");
-    expect(reply).not.toMatch(/\$/);
-    expect(ctx.drafts.map((d) => d.audience)).toEqual([
-      { kind: "member", memberId: 2 },
-      { kind: "member", memberId: 1 },
-    ]);
-    expect(ctx.drafts.every((d) => d.sensitivity === "personal" && d.subjectMemberId === (d.audience as { memberId: number }).memberId)).toBe(true);
-    // A refusal in the group is private too.
-    const ctx2 = ctxFor(db, 2, true);
-    expect(await runFallback("I paid Alex back $5", ctx2)).toBe("I sent you the details privately.");
-    expect(ctx2.drafts[0]!.text).toContain("doesn't owe");
+  test("unknown apps and empty handles are refused", () => {
+    const db = setupHousehold();
+    expect(runTool("save_payment_method", { method: "Bitcoin", handle: "x" }, ctxFor(db, 0, false, "x"))).toMatchObject({ saved: false });
+    expect(runTool("save_payment_method", { method: "Venmo", handle: "" }, ctxFor(db, 0, false, "my venmo"))).toMatchObject({ saved: false });
+  });
+});
+
+describe("removing and forgetting", () => {
+  test("remove one app", async () => {
+    const db = withDebt();
+    await say(db, 0, false, "pay me through Zelle at dharaniDevadiga");
+    await say(db, 0, false, "my venmo is @dharani");
+    expect((await say(db, 0, false, "remove my venmo")).reply).toBe("Removed your Venmo payment info.");
+    expect(paymentMethods(db, 1)).toEqual([{ method: "Zelle", handle: "dharaniDevadiga" }]);
+    expect((await say(db, 0, false, "remove my paypal")).reply).toBe("You didn't have PayPal saved.");
   });
 
-  test("the tool rejects unknown people and paying yourself", () => {
-    const db = withExpense();
-    expect(runTool("record_payment", { other: "Taylor", direction: "i_paid_them" }, ctxFor(db, 2))).toMatchObject({ recorded: false });
-    expect(runTool("record_payment", { other: "me", direction: "i_paid_them" }, ctxFor(db, 2))).toMatchObject({ recorded: false });
+  test("forget me deletes payment info too", async () => {
+    const db = withDebt();
+    await say(db, 0, false, "pay me through Zelle at dharaniDevadiga");
+    const { reply } = await say(db, 0, false, "forget me");
+    expect(reply).toContain("payment info");
+    expect(paymentMethods(db, 1)).toEqual([]);
+  });
+
+  test("show my own payment info", async () => {
+    const db = setupHousehold();
+    expect((await say(db, 0, false, "my payment info")).reply).toContain("haven't saved any");
+    await say(db, 0, false, "pay me through Zelle at dharaniDevadiga");
+    expect((await say(db, 0, false, "my payment info")).reply).toBe("Roommates who owe you see: Zelle: dharaniDevadiga.");
+    expect(describeToolResult("get_payment_methods", { sent_privately: true })).toBe("I DM'd you your payment info.");
   });
 });
