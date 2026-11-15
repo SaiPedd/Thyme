@@ -12,7 +12,7 @@ a dollar total, or a recipient. It calls tools, and tools return facts.
 P1. Grocery expense splitting (plaintext; receipt photo is a stretch goal that depends on the spike)
 P2. Inventory and expiry tracker (USDA FoodKeeper), reminders, claims on expiring shared items
 P3. Kitchen companion (open questions, recipes from current inventory, saved preferences)
-P4. Waste ledger (tosses and rescues; shared waste goes into the same balances as grocery splits)
+P4. Waste ledger (tosses and rescues; tracked, never charged to balances, so nobody pays twice for a split item)
 Cut: dinner plans, break mode, weekly digest, dashboard, full onboarding. One seeded household; roommates join
 from the household group chat, and the agent (named by BOT_NAME, default Thyme, plus BOT_ALIASES) asks their names once.
 Do not add other features. Ask me first.
@@ -26,8 +26,7 @@ Channel: Claw Messenger (https://www.clawmessenger.com/docs) behind one adapter 
 
 ## Conventions
 - All time goes through `now()` in `src/clock.ts`. Never call `Date.now()` or `new Date()` directly. This is our fake clock for demos.
-- All outgoing messages go through `src/outbox.ts`: quiet hours 10 PM to 8 AM (household tz) for proactive sends,
-  daily caps, per-send result tracking, retry on retryable errors, honor 429 Retry-After, a local usage
+- All outgoing messages go through `src/outbox.ts`: no quiet hours (removed by the team), daily caps on proactive sends, per-send result tracking, retry on retryable errors, honor 429 Retry-After, a local usage
   counter, and refusing proactive sends above 90% of the monthly budget. `ok:true` means accepted, never delivered.
 - Every outbound message declares an audience (`group` or `member`) and passes through
   `src/privacy/projection.ts`. The group gets shared items, shared splits, and household totals only.
@@ -39,6 +38,7 @@ Channel: Claw Messenger (https://www.clawmessenger.com/docs) behind one adapter 
 - Expiry dates come only from the USDA FoodKeeper table. The model only maps a phrase to a table entry.
   `expires_at` uses the conservative low end. Ask raw or cooked when ambiguous.
 - Money is integer cents. Split shares always sum exactly to the total; leftover cents go to the buyer.
+- Item prices come only from what a roommate said they paid (or a receipt). Never estimate a price; unknown stays NULL.
 - Recipe suggestions are checked in code against the inventory. Pantry staples (salt, pepper, garlic, oils, dried
   spices and herbs, onions, stock, flour, sugar...) are assumed; perishables must be in the inventory.
   Built-in recipes need every non-staple ingredient. TheMealDB recipes need half or more of their main ingredients,
@@ -57,11 +57,11 @@ Channel: Claw Messenger (https://www.clawmessenger.com/docs) behind one adapter 
 - Work phase by phase from PLAN.md. Propose a plan before editing files.
 - Commit after each phase. Run `bun test` before saying a phase is done, then say exactly what to test from a phone.
 - Tests cover: split math invariants, the conservative expiry rule, projection (the group never leaks personal data),
-  claim arbitration, quiet hours and caps, undo, duplicate expenses, the receipt sum check, and a 3-day fake-clock scenario.
+  claim arbitration, daily caps and budget, undo, duplicate expenses, the receipt sum check, and a 3-day fake-clock scenario.
 - Keep code simple. This is a ~4-hour build with 3 people working in parallel.
 
 ## Commands
 - `bun run start`: run the agent. `bun test`: tests.
-- `bun run chat`: terminal adapter. `bun run seed`: one household, 3 members, starting inventory.
+- `bun run chat`: terminal adapter. `bun run seed`: reset to one household with an empty kitchen (roommates join from the group chat); `--demo` adds 3 fictional members and a starter fridge.
 - `bun run time-travel +1d`: advance the clock and tick the scheduler. `bun run spike`: Claw connectivity spike.
 - `bun run register-phones`, `bun run load-foodkeeper`, `bun run eval`.

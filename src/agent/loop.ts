@@ -4,7 +4,7 @@
 // (or the user) produced is rejected.
 
 import { GoogleGenAI } from "@google/genai";
-import { describeToolResult, runFallback } from "./fallback";
+import { describeToolResult, parseIntent, runFallback } from "./fallback";
 import { systemPrompt, turnContext } from "./prompt";
 import { runToolAsync, toolDefinitions, type ToolContext } from "./tools";
 
@@ -73,6 +73,14 @@ export function durationsAreGrounded(reply: string, sources: string[]): boolean 
   return true;
 }
 
+/** Intents answered by code, never by the model's wording. */
+const FACT_QUESTIONS = new Set(["inventory", "balances", "waste"]);
+
+/** "I sent your balance to your DMs", "I DM'd you": only true if a private message was actually queued. */
+export function claimsPrivateSend(reply: string): boolean {
+  return /\b(sent|send|texted|messaged)\b[^.!?\n]*\b(DMs?|privately|private message)\b|\bDM'?d (you|them)\b/i.test(reply);
+}
+
 /**
  * If the reply uses a TheMealDB recipe, make sure the link and the credit are in it (code, not the model,
  * guarantees attribution and that they can open the full recipe).
@@ -119,6 +127,10 @@ export async function runAgent(input: AgentInput): Promise<AgentResult> {
   };
 
   if (!input.client) return fallback("llm off");
+  // Questions whose whole answer is a list of facts (what's in the fridge, balances, waste) are
+  // answered by code directly: the model has made up items and "I DM'd you" for these before.
+  const intent = parseIntent(text, botName);
+  if (intent && FACT_QUESTIONS.has(intent.kind)) return fallback("fact question");
 
   const timeoutMs = input.timeoutMs ?? AGENT_TIMEOUT_MS;
   const started = performance.now();
@@ -175,6 +187,7 @@ export async function runAgent(input: AgentInput): Promise<AgentResult> {
         const sources = [text, ...toolResults.map((t) => JSON.stringify(t.result))];
         if (!amountsAreGrounded(reply, sources)) return fallback("ungrounded amount");
         if (!durationsAreGrounded(reply, sources)) return fallback("ungrounded duration");
+        if (claimsPrivateSend(reply) && ctx.drafts.length === 0) return fallback("claimed a DM that wasn't sent");
         return { reply: withRecipeCredit(reply, toolResults), source: "gemini", toolCalls };
       }
 

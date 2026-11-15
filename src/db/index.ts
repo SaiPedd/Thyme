@@ -15,6 +15,21 @@ export function migrate(db: Database): number {
       "Database has tables from an older layout. It's local and rebuildable: delete data/fridge.db* and restart.",
     );
   }
+  // Repair: before Phase 4 and 5 were merged, the phase-5 branch used migration 4 for the waste ledger
+  // (now 5; 4 is the TheMealDB cache). A database from that branch is at version 4 with the ledger
+  // column but no cache tables: add the cache tables and mark it as version 5.
+  const has = (sql: string) => !!db.query(sql).get();
+  if (
+    current === 4 &&
+    has("SELECT 1 FROM pragma_table_info('ledger') WHERE name = 'priced'") &&
+    !has("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'mealdb_meals'")
+  ) {
+    db.transaction(() => {
+      db.exec(MIGRATIONS[3]!);
+      db.exec("PRAGMA user_version = 5");
+    })();
+    return migrate(db) + 1;
+  }
   for (let v = current; v < MIGRATIONS.length; v++) {
     db.transaction(() => {
       db.exec(MIGRATIONS[v]!);
