@@ -22,7 +22,8 @@ export type Intent =
   | { kind: "pref"; pref: "diet" | "dislike" | "allergy" | "like"; value: string }
   | { kind: "my_prefs" }
   | { kind: "forget" }
-  | { kind: "check"; item: string };
+  | { kind: "check"; item: string }
+  | { kind: "waste" };
 
 const WORDS: Record<string, number> = { two: 2, three: 3, four: 4, five: 5, six: 6 };
 
@@ -44,6 +45,7 @@ export function parseIntent(raw: string, botName = ""): Intent | null {
   const t = text.toLowerCase();
 
   if (/^(undo|scratch that|nvm undo)\b/.test(t)) return { kind: "undo" };
+  if (/\b(how much (food )?(have|did) (we|i) (waste|wasted|toss|tossed|throw)|waste (report|summary|stats)|how much (food )?waste)/.test(t)) return { kind: "waste" };
   if (/\b(what do i owe|who owes me|my balance|balances?\??$)/.test(t)) return { kind: "balances" };
 
   const money = text.match(/\$\s?\d[\d,]*(?:\.\d{1,2})?/);
@@ -107,7 +109,8 @@ export function parseIntent(raw: string, botName = ""): Intent | null {
 export function describeToolResult(name: string, r: Record<string, any>): string | null {
   switch (name) {
     case "undo_last":
-      return r.undone ? `Undone: the ${r.total} expense is removed.` : "There's nothing of yours to undo.";
+      if (!r.undone) return "There's nothing of yours to undo.";
+      return r.kind === "toss" ? `Undone: the ${r.item} is back in the fridge list.` : `Undone: the ${r.total} expense is removed.`;
     case "get_balances":
       if (r.sent_privately) return "I sent your balance to you privately.";
       return [`Your balance: ${r.net}.`, ...((r.breakdown as string[]) ?? [])].join("\n");
@@ -135,8 +138,27 @@ export function describeToolResult(name: string, r: Record<string, any>): string
     case "use_item":
       if (!r.done) return `I don't see that in the fridge list.`;
       return r.rescued ? `Nice save! The ${r.item} was about to expire. Marked as used.` : `Marked the ${r.item} as used.`;
-    case "log_toss":
-      return r.done ? `Marked the ${r.item} as tossed.` : `I don't see that in the fridge list.`;
+    case "log_toss": {
+      if (!r.done) return `I don't see that in the fridge list.`;
+      if (r.sent_privately) return "Logged. I DM'd you the details.";
+      const owes = (r.who_owes_whom as string[] | undefined) ?? [];
+      return [
+        `Logged the ${r.item} as tossed${r.cost !== "unknown" ? ` (${r.cost})` : ""}.`,
+        ...owes,
+        ...(r.note ? [String(r.note)] : []),
+        `Reply "undo" if that was a mistake.`,
+      ].join("\n");
+    }
+    case "get_waste_summary": {
+      type T = { items: number; dollars: string; weight: string; climate: string };
+      const line = (label: string, x: { tossed: T; rescued: T }) =>
+        `${label}: tossed ${x.tossed.items} (${x.tossed.dollars}, about ${x.tossed.weight}, ${x.tossed.climate}); rescued ${x.rescued.items} (${x.rescued.dollars}, about ${x.rescued.weight}).`;
+      return [
+        line("This month, the house", r.household_this_month),
+        ...(r.you_this_month ? [line("You this month", r.you_this_month)] : []),
+        "Pounds and CO2 are estimates by food type.",
+      ].join("\n");
+    }
     case "get_inventory": {
       const fmt = (xs: { item: string; status: string }[]) => xs.map((x) => `- ${x.item}: ${x.status}`);
       const shared = (r.shared as { item: string; status: string }[] | undefined) ?? [];
@@ -248,5 +270,7 @@ export function runFallback(text: string, ctx: ToolContext, botName = ""): strin
       return describeToolResult("forget_me", runTool("forget_me", {}, ctx));
     case "check":
       return describeToolResult("check_item", runTool("check_item", { item: intent.item }, ctx));
+    case "waste":
+      return describeToolResult("get_waste_summary", runTool("get_waste_summary", {}, ctx));
   }
 }

@@ -79,6 +79,9 @@ the ledger row and balances are Phase 5.
 - Test: `bun test` and `bun run time-travel +2d`
 
 ### Phase 4: P3 kitchen companion (T+2:00 to 2:45)
+**Status: DONE.** suggest_recipe (built-in recipes from inventory only, preferring food about to expire;
+model ideas validated in code), save/get preferences honored for everyone eating, cooked_recipe with
+confirmation, check_item, forget_me, and fallback rules for all of them.
 - Tools: suggest_recipe, save_preference, get_preferences, get_household_summary.
 - Recipes use only current inventory (plus salt and oil). Code checks every ingredient and flags
   what's missing, honoring dislikes and diets. "I cooked it" updates the inventory after confirmation.
@@ -91,6 +94,11 @@ the ledger row and balances are Phase 5.
 - Test: `bun test` and `bun run chat`
 
 ### Phase 5: P4 waste ledger and combined balances (T+2:30 to 3:15)
+**Status: DONE.** log_toss writes the ledger; a shared toss is split equally into balance_entries
+(source 'waste'), except when the buyer already logged an expense the day the item was added (no
+double charge). Rescues are logged from use_item and cooked_recipe. undo_last reverses the newer of
+the last expense or toss. get_waste_summary gives $, lb, and CO2 (src/domain/impact.ts); the group gets
+household totals only.
 - log_toss writes a ledger row. A personal toss costs the owner. A shared toss is split equally,
   and each non-buyer owes the buyer their share. An at-risk item (within 48h) eaten = rescued.
 - Same balance_entries table as expenses. "what do I owe?" returns one number plus a breakdown, in DM.

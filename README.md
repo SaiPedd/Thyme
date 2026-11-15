@@ -1,4 +1,4 @@
-# Fridge Squad 🌿 meet Thyme
+# Meet Thyme
 
 **Thyme** is an iMessage agent for roommates. Add it to your household group chat (or text it directly)
 and it splits grocery bills, keeps track of what's in the fridge before it spoils, answers kitchen
@@ -14,10 +14,10 @@ Full build plan: [PLAN.md](PLAN.md).
 | 0 | Claw Messenger spike, config, database schema, USDA FoodKeeper import | Done |
 | 1 | Bun WebSocket integration, Gemini Interactions loop, privacy and outbox | Done |
 | 2 | Expense splitting: split summary, recording expenses, undo, balances | Done |
-| 3 | Inventory and expiry tracking, reminders, claims on expiring food | Next |
-| 4 | Kitchen companion: recipes from what's in the fridge, saved preferences | Planned |
-| 5 | Waste ledger: tosses and rescues, shared waste in the same balances | Planned |
-| 6 | Receipt photos (stretch) | Planned |
+| 3 | Inventory and expiry tracking, reminders, claims on expiring food | Done |
+| 4 | Kitchen companion: recipes from what's in the fridge, saved preferences | Done |
+| 5 | Waste ledger: tosses and rescues, shared waste in the same balances | Done |
+| 6 | Receipt photos (stretch) | Next |
 | 7 | Demo polish, eval script | Planned |
 
 ## What works today
@@ -53,6 +53,14 @@ Thyme:  Cooked rice lasts 4-6 days in the fridge according to the USDA FoodKeepe
 - **Getting its attention:** say "Thyme" (or an alias from `BOT_ALIASES`) anywhere in a message. In the group
   it also answers questions and clear food or expense logs. Other chatter is kept as context, and Thyme stays quiet.
 - **Shelf life:** answers come from the USDA FoodKeeper table (661 foods), never from the model's memory.
+- **Fridge tracking:** "got spinach and milk" logs food with a USDA expiry date. Thyme reminds the group at
+  9 AM about shared food expiring within 48 hours (personal food goes to the owner's DM), and "mine" claims it.
+- **Kitchen companion:** "what can I make?" suggests a recipe that only uses what's in the fridge, favoring food
+  about to expire and honoring saved diets, dislikes, and allergies.
+- **Waste ledger:** "tossed the spinach" splits a shared item's cost into the same balances as groceries
+  (unless that day's groceries were already split). Eating something before it expires counts as a rescue.
+  "How much have we wasted?" shows dollars, pounds, and CO2; the group sees household totals only.
+  "undo" reverses the last expense or toss.
 
 ## How it works
 
@@ -115,7 +123,7 @@ bun run seed             # one household + a starting fridge; roommates join fro
 bun run seed --demo      # fictional roommates (Alex, Sam, Jordan) for the terminal chat
 bun run chat             # talk to Thyme in the terminal (/as <name>, /group, /dm); sends no real messages
 bun start                # run Thyme on Claw Messenger (real iMessage)
-bun test                 # 90 tests
+bun test                 # 134 tests
 bun run typecheck
 ```
 
@@ -127,14 +135,16 @@ To try it without phones, run `bun run seed --demo` and then `bun run chat`.
 index.ts                 entry point (Claw or terminal adapter)
 src/adapters/            claw.ts (WebSocket), terminal.ts (dev), types.ts (one interface for both)
 src/agent/               loop.ts (Gemini function calling), tools.ts, prompt.ts, fallback.ts, triggers.ts
-src/domain/              money, splits, expenses, household, foodkeeper, phone
+src/domain/              money, splits, expenses, household, foodkeeper, phone, inventory, claims,
+                         recipes, prefs, prices, waste (ledger), impact (pounds and CO2)
 src/privacy/projection.ts  who can see what
 src/inbox.ts             dedupe, debounce, per-chat ordering
 src/outbox.ts            quiet hours, caps, budget, retries, delivery tracking
 src/router.ts            members, group rules, names, replies
 src/db/                  SQLite schema and migrations
 src/clock.ts             the only source of time (fake clock for demos)
-scripts/                 spike, register-phones, seed, load-foodkeeper
+src/scheduler.ts         9 AM expiry reminders (one retry), clock offset for time travel
+scripts/                 spike, register-phones, seed, load-foodkeeper, time-travel
 test/                    bun test suites
 data/foodkeeper.json     USDA FoodKeeper data
 ```
@@ -144,11 +154,15 @@ data/foodkeeper.json     USDA FoodKeeper data
 - **Shelf life:** [USDA FSIS FoodKeeper](https://catalog.data.gov/dataset/fsis-foodkeeper-data) (public domain).
   Imported into SQLite on first start. Expiry uses the conservative low end of each range. Foods where
   USDA gives guidance instead of a number (milk: "Package use-by date") keep that guidance.
+- **CO2 of wasted food:** category averages of kg CO2e per kg from Poore & Nemecek (2018), *Science*
+  360(6392), via [Our World in Data](https://ourworldindata.org/food-choice-vs-eating-local). Weights per
+  item are typical package sizes. Both are estimates, and Thyme says so.
+- **Price estimates:** `data/prices.json`, rough US grocery prices used until someone gives the real price.
 
 ## Known limitations
 
 - Receipt photos arrive but aren't read yet (Phase 6).
-- Logging food ("got spinach", "tossed the milk") is recognized but not stored yet (Phase 3).
-- Recipe ideas aren't checked against what's actually in the fridge yet (Phase 4).
+- Waste costs use the price someone gave, or an estimate from `data/prices.json` when they didn't.
+- Pounds and CO2 are per-category estimates, not weighed amounts.
 - Group chats need both roommates' numbers registered with Claw first (`bun run register-phones`).
 - Thyme is also a herb, so "we're out of thyme" will get a reply.

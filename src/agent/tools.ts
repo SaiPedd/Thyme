@@ -25,6 +25,8 @@ import {
 import { memberByName, type Household, type Member } from "../domain/household";
 import { SplitError, type SplitSpec } from "../domain/splits";
 import type { Draft } from "../privacy/projection";
+import { lastToss, logRescue, logToss, monthStartIso, undoLastToss, wasteTotals, type KindTotals } from "../domain/waste";
+import { formatCo2, formatPounds } from "../domain/impact";
 
 export interface ToolContext {
   db: Database;
@@ -187,11 +189,21 @@ const recordExpenseTool: ToolDef = {
 
 const undoTool: ToolDef = {
   name: "undo_last",
-  description: "Undo the most recent expense the sender logged. Use when they say undo, scratch that, or it was wrong.",
+  description: "Undo the sender's most recent expense or toss, whichever is newer. Use when they say undo, scratch that, or it was wrong.",
   input_schema: { type: "object", properties: {}, additionalProperties: false },
   run(_input, ctx) {
+    const expense = ctx.db
+      .query<{ created_at: string }, [number, number]>(
+        "SELECT created_at FROM expenses WHERE household_id = ? AND buyer_member_id = ? AND undone_at IS NULL ORDER BY id DESC LIMIT 1",
+      )
+      .get(ctx.household.id, ctx.member.id);
+    const toss = lastToss(ctx.db, ctx.household.id, ctx.member.id);
+    if (toss && (!expense || toss.at >= expense.created_at)) {
+      const undone = undoLastToss(ctx.db, ctx.household.id, ctx.member.id)!;
+      return { undone: true, kind: "toss", item: undone.name, note: "The item is back in the fridge list and its waste split is removed." };
+    }
     const undone = undoLastExpense(ctx.db, ctx.household.id, ctx.member.id);
-    return undone ? { undone: true, total: formatCents(undone.totalCents) } : { undone: false, note: "nothing to undo" };
+    return undone ? { undone: true, kind: "expense", total: formatCents(undone.totalCents) } : { undone: false, note: "nothing to undo" };
   },
 };
 
@@ -339,28 +351,84 @@ const addItemTool: ToolDef = {
   },
 };
 
-function statusTool(name: "use_item" | "log_toss", status: "used" | "tossed", description: string): ToolDef {
-  return {
-    name,
-    description,
-    input_schema: {
-      type: "object",
-      properties: { item: { type: "string", description: "The food as the user said it, e.g. \"the spinach\"" } },
-      required: ["item"],
-      additionalProperties: false,
-    },
-    run(input, ctx) {
-      const item = findItem(ctx.db, ctx.household.id, ctx.member.id, String(input.item ?? ""));
-      if (!item) return { done: false, note: `nothing called "${input.item}" in the fridge list` };
-      const rescued = status === "used" && isAtRisk(item) && !isPast(item);
-      setItemStatus(ctx.db, item.id, status);
-      return { done: true, item: item.name, status, ...(rescued ? { rescued: true, note: "It was about to expire: a rescue." } : {}) };
-    },
-  };
-}
+const itemInput = {
+  type: "object",
+  properties: { item: { type: "string", description: "The food as the user said it, e.g. \"the spinach\"" } },
+  required: ["item"],
+  additionalProperties: false,
+};
 
-const useItemTool = statusTool("use_item", "used", "Mark food as used up or eaten. Use for \"used the X\", \"finished the X\", \"ate the X\", \"I cooked it\".");
-const tossItemTool = statusTool("log_toss", "tossed", "Mark food as thrown out. Use for \"tossed the X\", \"threw out the X\", \"the X went bad\".");
+const useItemTool: ToolDef = {
+  name: "use_item",
+  description: "Mark food as used up or eaten. Use for \"used the X\", \"finished the X\", \"ate the X\", \"I cooked it\".",
+  input_schema: itemInput,
+  run(input, ctx) {
+    const item = findItem(ctx.db, ctx.household.id, ctx.member.id, String(input.item ?? ""));
+    if (!item) return { done: false, note: `nothing called "${input.item}" in the fridge list` };
+    const rescued = isAtRisk(item) && !isPast(item);
+    setItemStatus(ctx.db, item.id, "used");
+    if (rescued) logRescue(ctx.db, item, ctx.member.id);
+    return { done: true, item: item.name, status: "used", ...(rescued ? { rescued: true, note: "It was about to expire: a rescue." } : {}) };
+  },
+};
+
+const tossItemTool: ToolDef = {
+  name: "log_toss",
+  description:
+    "Log food thrown out (\"tossed the X\", \"threw out the X\", \"the X went bad\"). Code writes the waste ledger and splits a shared item's cost; " +
+    "repeat who_owes_whom exactly as returned.",
+  input_schema: itemInput,
+  run(input, ctx) {
+    const item = findItem(ctx.db, ctx.household.id, ctx.member.id, String(input.item ?? ""));
+    if (!item) return { done: false, note: `nothing called "${input.item}" in the fridge list` };
+    const r = logToss(ctx.db, item, ctx.member.id, ctx.household.tz);
+    const facts: ToolResult = {
+      done: true,
+      item: item.name,
+      status: "tossed",
+      cost: r.costCents > 0 ? formatCents(r.costCents) : "unknown",
+      ...(r.debts
+        ? { who_owes_whom: r.debts.map((d) => `${nameOf(ctx, d.debtorId)} owes ${nameOf(ctx, d.creditorId)} ${formatCents(d.amountCents)}`) }
+        : {}),
+      ...(r.splitSkippedReason === "already_split" ? { note: "Not split again: the groceries from that day were already split." } : {}),
+      ...(r.splitSkippedReason === "no_price" ? { note: "No price known, so balances didn't change." } : {}),
+      how_to_fix: "Reply \"undo\" if that was a mistake.",
+    };
+    if (r.shared || !ctx.isGroup) return facts;
+    // A personal item: the details go to the owner's DM only.
+    ctx.drafts.push({
+      audience: { kind: "member", memberId: item.owner_member_id! },
+      sensitivity: "personal",
+      subjectMemberId: item.owner_member_id!,
+      text: [`Logged your ${item.name} as tossed${r.costCents > 0 ? ` (${formatCents(r.costCents)})` : ""}.`, ...((facts.who_owes_whom as string[]) ?? [])].join("\n"),
+    });
+    return { done: true, sent_privately: true, note: "It was a personal item. Details were sent by DM. Don't name it in the group." };
+  },
+};
+
+const totalsFacts = (t: KindTotals) => ({ items: t.count, dollars: formatCents(t.cents), weight: formatPounds(t.grams), climate: formatCo2(t.co2Grams) });
+
+const wasteSummaryTool: ToolDef = {
+  name: "get_waste_summary",
+  description:
+    "The household's waste report: food tossed vs rescued (eaten before it expired) this month and all time, in dollars, pounds, and CO2. " +
+    "Weight and CO2 are estimates; say so. Use for \"how much have we wasted?\" or \"waste report\".",
+  input_schema: { type: "object", properties: {}, additionalProperties: false },
+  run(_input, ctx) {
+    const since = monthStartIso(ctx.household.tz);
+    const month = wasteTotals(ctx.db, ctx.household.id, { sinceIso: since });
+    const all = wasteTotals(ctx.db, ctx.household.id);
+    const facts: ToolResult = {
+      household_this_month: { tossed: totalsFacts(month.wasted), rescued: totalsFacts(month.rescued) },
+      household_all_time: { tossed: totalsFacts(all.wasted), rescued: totalsFacts(all.rescued) },
+      estimate_note: "Pounds and CO2 are category estimates (Poore & Nemecek 2018).",
+    };
+    // The group sees household totals only; per-person numbers are for that person's DM.
+    if (ctx.isGroup) return facts;
+    const mine = wasteTotals(ctx.db, ctx.household.id, { memberId: ctx.member.id, sinceIso: since });
+    return { ...facts, you_this_month: { tossed: totalsFacts(mine.wasted), rescued: totalsFacts(mine.rescued) } };
+  },
+};
 
 const inventoryTool: ToolDef = {
   name: "get_inventory",
@@ -564,7 +632,10 @@ const cookedTool: ToolDef = {
       if (!pending) return { done: false, note: "Nothing is waiting for confirmation." };
       const items = freshNames(pending.itemIds);
       const rescued = items.filter((i) => isAtRisk(i) && !isPast(i)).map((i) => i.name);
-      for (const i of items) setItemStatus(ctx.db, i.id, "used");
+      for (const i of items) {
+        setItemStatus(ctx.db, i.id, "used");
+        if (isAtRisk(i) && !isPast(i)) logRescue(ctx.db, i, ctx.member.id);
+      }
       ctx.db.run("DELETE FROM state WHERE key = ?", [`cook:${ctx.member.id}`]);
       return { done: true, title: pending.title, marked_used: items.map((i) => i.name), rescued };
     }
@@ -672,6 +743,7 @@ export const TOOLS: ToolDef[] = [
   addItemTool,
   useItemTool,
   tossItemTool,
+  wasteSummaryTool,
   inventoryTool,
   claimTool,
   suggestRecipeTool,
