@@ -53,6 +53,10 @@ Thyme:  Cooked rice lasts 4-6 days in the fridge according to the USDA FoodKeepe
 - **Getting its attention:** say "Thyme" (or an alias from `BOT_ALIASES`) anywhere in a message. In the group
   it also answers questions and clear food or expense logs. Other chatter is kept as context, and Thyme stays quiet.
 - **Shelf life:** answers come from the USDA FoodKeeper table (661 foods), never from the model's memory.
+- **How to pay back:** "pay me through Zelle at dharaniDevadiga" or "my Venmo is @dharani" saves how you want
+  to be paid (Zelle, Venmo, Cash App, PayPal, Apple Cash; several allowed). "What do I owe?" then shows it next
+  to each amount: "you owe Dharani $13.20 (pay with Zelle: dharaniDevadiga)". Handles are saved exactly as typed,
+  only shown in DMs, and removed with "remove my Venmo" or "forget me".
 - **Prices:** an item's price is only what a roommate said they paid ("got spinach for $4", or an expense
   line like "chicken thighs ($9) are just mine"). No price given means unknown, never estimated.
 - **Waste ledger:** "tossed the spinach" is logged as wasted; eating food within 48h of its date is a rescue.
@@ -123,7 +127,7 @@ bun run seed --demo      # fictional roommates (Alex, Sam, Jordan) and a starter
 bun run mealdb-warm      # pre-cache TheMealDB recipes for what's in the kitchen (run before a demo)
 bun run chat             # talk to Thyme in the terminal (/as <name>, /group, /dm); sends no real messages
 bun start                # run Thyme on Claw Messenger (real iMessage)
-bun test                 # 156 tests
+bun test                 # 168 tests
 bun run typecheck
 ```
 
