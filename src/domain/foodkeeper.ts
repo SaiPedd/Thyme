@@ -171,10 +171,14 @@ export function searchShelfLife(db: Database, query: string, limit = 5): ShelfLi
   const terms = words.map((w) => `"${w}"*`);
   const results = run(terms.join(" AND "));
   if (results.length < limit && words.length > 1) {
+    // Then the last word alone (the head noun: "baby spinach" -> spinach), then any word.
     const seen = new Set(results.map((r) => r.id));
-    for (const r of run(terms.join(" OR "))) {
+    for (const r of [...run(terms.at(-1)!), ...run(terms.join(" OR "))]) {
       if (results.length >= limit) break;
-      if (!seen.has(r.id)) results.push(r);
+      if (!seen.has(r.id)) {
+        seen.add(r.id);
+        results.push(r);
+      }
     }
   }
   return results;
@@ -208,4 +212,54 @@ export function shelfLifeDays(row: ShelfLifeRow, storage: Storage): number | nul
 export function expiryFor(row: ShelfLifeRow, storage: Storage, addedAt: Date): Date | null {
   const days = shelfLifeDays(row, storage);
   return days === null ? null : addDays(addedAt, days);
+}
+
+/** USDA guidance with no number for a storage ("Package use-by date"), if any. */
+export function shelfLifeNote(row: ShelfLifeRow, storage: Storage): string | null {
+  if (storage === "pantry") return row.pantry_note;
+  if (storage === "fridge") return row.fridge_note;
+  return row.freezer_note;
+}
+
+/** Where an item most likely lives: the fridge if FoodKeeper lists it there, else the pantry, else the freezer. */
+export function defaultStorage(row: ShelfLifeRow): Storage {
+  if (row.fridge_min_days !== null) return "fridge";
+  if (row.pantry_min_days !== null) return "pantry";
+  if (row.fridge_note) return "fridge";
+  if (row.pantry_note) return "pantry";
+  return row.freezer_min_days !== null ? "freezer" : "fridge";
+}
+
+const COOKED = /\b(cooked|leftovers?|hard boiled|fried|homemade)\b/i;
+
+export function getShelfLife(db: Database, id: number): ShelfLifeRow | null {
+  return db.query<ShelfLifeRow, [number]>("SELECT * FROM shelf_life WHERE id = ?").get(id);
+}
+
+export type ShelfLifePick = { row: ShelfLifeRow } | { ambiguous: string[] } | null;
+
+/**
+ * Map a food phrase to one FoodKeeper row, for when the model didn't pick an id (and for the fallback).
+ * Raw vs cooked: the phrase decides ("leftover rice"), else `state`; if the top matches mix raw and
+ * cooked entries and nothing decides, returns them so the caller can ask. Skips rows with no data.
+ */
+export function pickShelfLife(db: Database, phrase: string, state?: "raw" | "cooked"): ShelfLifePick {
+  const matches = searchShelfLife(db, phrase, 5);
+  if (matches.length === 0) return null;
+  const cooked = (m: ShelfLifeMatch) => COOKED.test(`${m.name} ${m.subtitle ?? ""}`);
+  const wanted = COOKED.test(phrase) ? "cooked" : /\braw\b/i.test(phrase) ? "raw" : state;
+  let pool = matches;
+  if (wanted) {
+    const filtered = matches.filter((m) => cooked(m) === (wanted === "cooked"));
+    if (filtered.length) pool = filtered;
+  } else {
+    const top = matches.slice(0, 3);
+    if (top.some(cooked) && top.some((m) => !cooked(m))) {
+      return { ambiguous: top.map((m) => (m.subtitle ? `${m.name.trim()} (${m.subtitle})` : m.name.trim())) };
+    }
+  }
+  const rows = pool.map((m) => getShelfLife(db, m.id)!);
+  const hasData = (r: ShelfLifeRow) =>
+    [r.pantry_min_days, r.fridge_min_days, r.freezer_min_days, r.pantry_note, r.fridge_note].some((v) => v !== null);
+  return { row: rows.find(hasData) ?? rows[0]! };
 }

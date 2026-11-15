@@ -165,7 +165,7 @@ export function makeRouter(deps: RouterDeps) {
     log(`[in] ${m.isGroup ? "group" : "dm"} from ${mask(phone)}${m.attachments.length ? ` (${m.attachments.length} attachment)` : ""}`);
 
     const drafts: Draft[] = [];
-    const ctx: ToolContext = { db, household, members, member, isGroup: m.isGroup, messageId: m.messageId, drafts };
+    const ctx: ToolContext = { db, household, members, member, isGroup: m.isGroup, messageId: m.messageId, sentAt: m.sentAt, drafts };
     const history = loadHistory(db, m.chatId);
     saveTurn(db, m.chatId, member, "user", shown, at);
 

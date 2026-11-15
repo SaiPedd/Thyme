@@ -13,6 +13,7 @@ import { getHousehold, getMembers } from "./src/domain/household";
 import { Inbox } from "./src/inbox";
 import { Outbox } from "./src/outbox";
 import { makeRouter } from "./src/router";
+import { Scheduler, syncClockFromDb } from "./src/scheduler";
 
 const useTerminal = process.argv.includes("--terminal") || process.env.ADAPTER === "terminal";
 const loaded = loadConfig(process.env, { requireClaw: !useTerminal });
@@ -21,6 +22,7 @@ const { config } = loaded;
 
 const db = openDb(config.dbPath);
 await ensureShelfLife(db);
+syncClockFromDb(db); // honor `bun run time-travel`
 const household = getHousehold(db);
 if (!household) {
   console.error("[start] no household yet: run `bun run seed` first");
@@ -66,8 +68,15 @@ console.log(
   }`,
 );
 
-// Send proactive messages deferred by quiet hours once they're due. (The full scheduler is Phase 3.)
-const flusher = setInterval(() => void outbox.flushDue(), 60_000);
+// Scheduler: deferred sends, and the 09:00 expiry reminders. Re-reads the demo clock each tick,
+// so `bun run time-travel +2d` in another terminal takes effect within a few seconds.
+const scheduler = new Scheduler(db, outbox, { groupChatId: devGroupChatId });
+const tick = () => {
+  syncClockFromDb(db);
+  scheduler.tick().catch((e) => console.error(`[scheduler] tick failed: ${(e as Error).name}`));
+};
+tick();
+const flusher = setInterval(tick, 5_000);
 
 process.on("SIGINT", async () => {
   clearInterval(flusher);

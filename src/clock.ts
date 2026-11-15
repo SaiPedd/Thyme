@@ -25,6 +25,15 @@ export function setNow(target: Date): Date {
   return now();
 }
 
+/** The current demo offset in ms (persisted by `bun run time-travel` in the state table). */
+export function getOffsetMs(): number {
+  return offsetMs;
+}
+
+export function setOffsetMs(ms: number): void {
+  offsetMs = ms;
+}
+
 /** Back to real time. */
 export function resetClock(): void {
   offsetMs = 0;

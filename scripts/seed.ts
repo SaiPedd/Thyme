@@ -40,6 +40,7 @@ db.transaction(() => {
     db.run(`DELETE FROM ${t}`);
   }
   db.run("DELETE FROM state WHERE key LIKE 'intro:%'"); // so the agent introduces itself again
+  db.run("DELETE FROM state WHERE key LIKE 'daily:%' OR key = 'clock_offset_ms'"); // back to real time, reminders not yet run
   db.run("INSERT INTO households (id, name, chat_id, tz, mode, created_at) VALUES (1, 'Squad House', ?, ?, ?, ?)", [
     process.env.HOUSEHOLD_CHAT_ID?.trim() || null,
     config.householdTz,
@@ -54,11 +55,11 @@ db.transaction(() => {
 // Starting inventory. Expiry comes from FoodKeeper (conservative low end), never typed in here.
 const shelf = (id: number) => db.query<ShelfLifeRow, [number]>("SELECT * FROM shelf_life WHERE id = ?").get(id)!;
 const items: { query: string; name: string; storage: Storage; owner: number | null; buyer: number; cents: number; boughtDaysAgo: number }[] = [
-  { query: "bagged greens spinach", name: "baby spinach", storage: "fridge", owner: null, buyer: 1, cents: 399, boughtDaysAgo: 2 },
+  { query: "bagged greens spinach", name: "baby spinach", storage: "fridge", owner: null, buyer: 1, cents: 399, boughtDaysAgo: 0 },
   { query: "chicken parts thighs", name: "chicken thighs", storage: "fridge", owner: 1, buyer: 1, cents: 900, boughtDaysAgo: 0 },
   { query: "eggs in shell", name: "eggs", storage: "fridge", owner: null, buyer: 2, cents: 449, boughtDaysAgo: 3 },
   { query: "rice white", name: "rice", storage: "pantry", owner: null, buyer: 2, cents: 299, boughtDaysAgo: 10 },
-  { query: "bananas", name: "bananas", storage: "fridge", owner: null, buyer: 3, cents: 179, boughtDaysAgo: 1 },
+  { query: "bananas", name: "bananas", storage: "fridge", owner: null, buyer: 3, cents: 179, boughtDaysAgo: 0 },
 ];
 for (const it of items) {
   const match = searchShelfLife(db, it.query, 1)[0];

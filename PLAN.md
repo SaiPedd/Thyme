@@ -60,6 +60,11 @@ integer-cent splits, duplicate detection, undo, and balances sent privately by D
 - Test: `bun test` and `bun run chat`
 
 ### Phase 3: P2 inventory, expiry, reminders, claims (T+1:30 to 2:30), B and C in parallel with Phase 2
+**Status: DONE.** add_item, use_item, log_toss, get_inventory, claim_item (agent + fallback rules);
+src/scheduler.ts (09:00 reminders, one retry, via the outbox); claims by sentAt (an earlier claim that
+arrives late takes over and the group is told); `time-travel` saves the clock offset in the state
+table so a running agent follows it within 5 s; data/prices.json. log_toss only marks the item;
+the ledger row and balances are Phase 5.
 - shelf_life_lookup (top 5 matches via FTS5). The model picks an id; code computes expires_at (low end).
   Ask raw or cooked when ambiguous.
 - add_item, use_item, log_toss, get_inventory; data/prices.json (~60 items) for estimates,
