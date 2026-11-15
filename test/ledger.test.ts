@@ -166,8 +166,8 @@ describe("fallback rules for waste", () => {
     const db = await kitchen();
     const ctx = ctxFor(db);
     runTool("add_item", { items: [{ name: "spinach", state: "raw", price: "$4" }, { name: "yogurt" }] }, ctx);
-    expect(runFallback("tossed the spinach", ctx)).toBe("Marked the spinach as tossed ($4.00 of food wasted).");
-    runFallback("tossed the yogurt", ctx);
-    expect(runFallback("how much have we wasted?", ctx)).toContain("wasted 2 items ($4.00, plus 1 with no price)");
+    expect(await runFallback("tossed the spinach", ctx)).toBe("Marked the spinach as tossed ($4.00 of food wasted).");
+    await runFallback("tossed the yogurt", ctx);
+    expect(await runFallback("how much have we wasted?", ctx)).toContain("wasted 2 items ($4.00, plus 1 with no price)");
   });
 });

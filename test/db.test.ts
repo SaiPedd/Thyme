@@ -1,10 +1,12 @@
 import { describe, expect, test } from "bun:test";
 import { Database } from "bun:sqlite";
 import { migrate, openDb } from "../src/db";
+import { MIGRATIONS } from "../src/db/schema";
 
 const TABLES = [
-  "balance_entries", "claims", "expense_shares", "expenses", "households", "items", "ledger", "members",
-  "nudges", "prefs", "seen_messages", "sends", "shelf_life", "shelf_life_fts", "state", "turns", "usage_counters",
+  "balance_entries", "claims", "expense_shares", "expenses", "households", "items", "ledger", "mealdb_by_ingredient",
+  "mealdb_meals", "members", "nudges", "prefs", "seen_messages", "sends", "shelf_life", "shelf_life_fts", "state", "turns",
+  "usage_counters",
 ];
 
 function seedBasics(db: Database) {
@@ -27,6 +29,18 @@ describe("schema", () => {
   test("migrate is idempotent", () => {
     const db = openDb(":memory:");
     expect(migrate(db)).toBe(0);
+  });
+
+  test("repairs a database from the pre-merge phase-5 branch (ledger was migration 4 there)", () => {
+    const db = new Database(":memory:");
+    for (const m of MIGRATIONS.slice(0, 3)) db.exec(m);
+    db.exec(MIGRATIONS[4]!); // the ledger column, applied as "4" on the old branch
+    db.exec("PRAGMA user_version = 4");
+    seedBasics(db);
+    migrate(db);
+    expect(db.query<{ user_version: number }, []>("PRAGMA user_version").get()!.user_version).toBe(MIGRATIONS.length);
+    expect(db.query("SELECT 1 FROM sqlite_master WHERE name = 'mealdb_meals'").get()).toBeTruthy();
+    expect(db.query<{ n: number }, []>("SELECT COUNT(*) AS n FROM items").get()!.n).toBe(1);
   });
 
   test("refuses an old-layout database instead of silently mixing schemas", () => {

@@ -200,7 +200,20 @@ ALTER TABLE sends ADD COLUMN reply_to TEXT;
   `
 ALTER TABLE members ADD COLUMN named INTEGER NOT NULL DEFAULT 1;
 `,
-  // 4: waste ledger. priced = 0 when nobody said what the item cost (cost_cents is then 0, not a guess).
+  // 4: local cache of TheMealDB lookups (live API + cache; the DB file is gitignored, never committed).
+  `
+CREATE TABLE mealdb_meals (
+  id          TEXT PRIMARY KEY,                              -- idMeal
+  data        TEXT NOT NULL,                                 -- the meal JSON as returned
+  fetched_at  TEXT NOT NULL
+);
+CREATE TABLE mealdb_by_ingredient (
+  ingredient  TEXT PRIMARY KEY,                              -- normalized query, e.g. "chicken_thighs"
+  meal_ids    TEXT NOT NULL,                                 -- JSON array of idMeal
+  fetched_at  TEXT NOT NULL
+);
+`,
+  // 5: waste ledger. priced = 0 when nobody said what the item cost (cost_cents is then 0, not a guess).
   `
 ALTER TABLE ledger ADD COLUMN priced INTEGER NOT NULL DEFAULT 0 CHECK (priced IN (0,1));
 CREATE INDEX ledger_by_household ON ledger(household_id, kind, at);

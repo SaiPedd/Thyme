@@ -169,8 +169,8 @@ describe("buy, then ask what's there", () => {
     const db = await withFoodKeeper();
     setNow(T0);
     const ctx = ctxFor(db, 0, true);
-    runFallback("I bought spinach and rice", ctx);
-    const reply = runFallback("what is in my fridge?", ctx)!;
+    await runFallback("I bought spinach and rice", ctx);
+    const reply = (await runFallback("what is in my fridge?", ctx))!;
     expect(reply).toContain("- spinach (fridge): expires in");
     expect(reply).toContain("- rice (pantry):");
   });
